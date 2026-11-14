@@ -1,0 +1,21 @@
+[package]
+name = "ah-config"
+description = "Format-preserving editors: TOML, JSON/JSONC, managed text blocks, per-entry symlinks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde_json.workspace = true
+toml_edit.workspace = true
+jsonc-parser.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+insta.workspace = true

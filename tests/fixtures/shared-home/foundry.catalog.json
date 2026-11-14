@@ -1,0 +1,18 @@
+{
+  "tenant": "00000000-0000-0000-0000-000000000000",
+  "resources": { "openai": "example-openai", "anthropic": "example-anthropic" },
+  "deployments": {
+    "claude-opus": "claude-opus-dep",
+    "claude-sonnet": "claude-sonnet-dep",
+    "claude-haiku": "claude-haiku-dep",
+    "gpt-codex": "gpt-codex-dep",
+    "gpt-general": "gpt-general-dep"
+  },
+  "defaults": {
+    "claude-code": "claude-sonnet",
+    "opencode": "claude-sonnet",
+    "codex": "gpt-codex",
+    "copilot": "github-hosted",
+    "hermes": "gpt-general"
+  }
+}

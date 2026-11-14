@@ -1,0 +1,17 @@
+[package]
+name = "ah-wsl"
+description = "WSL detection and Windows interop: user profile, drvfs paths, OneDrive check, schtasks, winget, obsidian."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+ah-core.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

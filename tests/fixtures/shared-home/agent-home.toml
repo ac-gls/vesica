@@ -1,0 +1,22 @@
+schema = 1
+
+[team]
+name = "Example Team"
+org = "example-org"
+env_prefix = "EX"
+role_prefix = "ex-"
+
+[profiles]
+default = "developer"
+
+[minimum]
+herdr = "0.9.0"
+node = "22.0.0"
+
+[hermes]
+profile = "team"
+
+[[repos]]
+name = "sample-app"
+url = "https://github.com/example-org/sample-app.git"
+profiles = ["developer", "lead"]
