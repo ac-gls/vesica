@@ -2,7 +2,16 @@
 
 /// Detect WSL from the kernel release, with an explicit CI override for tests.
 pub fn is_wsl_with(kernel_release: &str, allow_non_wsl: Option<&str>) -> bool {
-    allow_non_wsl == Some("1") || {
+    is_wsl_with_override(kernel_release, allow_non_wsl, None)
+}
+
+/// Detect WSL, allowing Vesica's override to take precedence over the legacy variable.
+pub fn is_wsl_with_override(
+    kernel_release: &str,
+    vesica_override: Option<&str>,
+    legacy_override: Option<&str>,
+) -> bool {
+    (vesica_override.or(legacy_override) == Some("1")) || {
         let value = kernel_release.to_ascii_lowercase();
         value.contains("microsoft") || value.contains("wsl")
     }
@@ -10,8 +19,9 @@ pub fn is_wsl_with(kernel_release: &str, allow_non_wsl: Option<&str>) -> bool {
 
 pub fn is_wsl() -> anyhow::Result<bool> {
     let release = std::fs::read_to_string("/proc/sys/kernel/osrelease")?;
-    Ok(is_wsl_with(
+    Ok(is_wsl_with_override(
         &release,
+        std::env::var("VESICA_ALLOW_NON_WSL").ok().as_deref(),
         std::env::var("AGENT_HOME_ALLOW_NON_WSL").ok().as_deref(),
     ))
 }
@@ -28,5 +38,15 @@ mod tests {
         ));
         assert!(!is_wsl_with("Linux version 6.6.1-generic", None));
         assert!(is_wsl_with("Linux version 6.6.1-generic", Some("1")));
+        assert!(!is_wsl_with_override(
+            "Linux version 6.6.1-generic",
+            Some("0"),
+            Some("1")
+        ));
+        assert!(is_wsl_with_override(
+            "Linux version 6.6.1-generic",
+            Some("1"),
+            Some("0")
+        ));
     }
 }
