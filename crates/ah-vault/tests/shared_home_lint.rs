@@ -44,6 +44,43 @@ fn lint_reports_unresolved_wikilink_without_echoing_linked_text() {
 }
 
 #[test]
+fn lint_flags_email_addresses_without_echoing_the_address() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("Knowledge")).unwrap();
+    std::fs::write(temp.path().join("Knowledge/README.md"), "# Knowledge\n").unwrap();
+    let marker = format!("person-{}@example.invalid", "X".repeat(8));
+    std::fs::write(
+        temp.path().join("Knowledge/contact.md"),
+        format!("Contact: {marker}\n"),
+    )
+    .unwrap();
+
+    let findings = lint_shared_home(temp.path()).unwrap();
+    let finding = findings
+        .iter()
+        .find(|finding| finding.rule == "VSH007")
+        .unwrap();
+    assert_eq!(finding.path, PathBuf::from("Knowledge/contact.md"));
+    assert_eq!(finding.line, 1);
+    assert!(!format!("{finding:?}").contains(&marker));
+}
+
+#[test]
+fn lint_ignores_email_like_text_without_a_valid_domain_suffix() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("Knowledge")).unwrap();
+    std::fs::write(temp.path().join("Knowledge/README.md"), "# Knowledge\n").unwrap();
+    std::fs::write(
+        temp.path().join("Knowledge/note.md"),
+        "literal name@localhost and user@example.123\n",
+    )
+    .unwrap();
+
+    let findings = lint_shared_home(temp.path()).unwrap();
+    assert!(!findings.iter().any(|finding| finding.rule == "VSH007"));
+}
+
+#[test]
 fn lint_flags_known_secret_pattern_without_emitting_value() {
     let temp = tempfile::tempdir().unwrap();
     let marker = format!("ghp_{}", "A".repeat(32));
