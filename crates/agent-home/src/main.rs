@@ -173,19 +173,14 @@ fn doctor(o: &DoctorOptions) -> Result<()> {
     let wsl = ah_wsl::is_wsl()?;
     let wsl_status = if wsl { "detected" } else { "not detected" };
     let selected = prof(&o.options, &c);
+    let selected_profile = ah_agents::ProfileSelection::from_name(&c, selected)?;
     if o.json {
         let report = serde_json::json!({
             "shared_home": "valid",
             "team": {"name": c.team.name, "org": c.team.org},
             "profile": selected,
             "repos_in_config": c.repos.len(),
-            "repos": c.repos.iter().filter(|repo| {
-                repo.profiles.is_empty() || repo.profiles.iter().any(|profile| match profile {
-                    ah_core::Profile::Core => selected == "core",
-                    ah_core::Profile::Developer => selected == "developer",
-                    ah_core::Profile::Lead => selected == "lead",
-                })
-            }).map(|repo| repo.name.as_str()).collect::<Vec<_>>(),
+            "repos": selected_profile.repositories.iter().map(|repo| repo.name.as_str()).collect::<Vec<_>>(),
             "foundry_deployments": f.deployments.len(),
             "wsl_kernel": wsl_status,
             "live_harness": "not-implemented",
@@ -205,15 +200,7 @@ Repos for profile: {}\nFoundry deployments: {}",
             c.team.org,
             selected,
             c.repos.len(),
-            c.repos
-                .iter()
-                .filter(|repo| repo.profiles.is_empty()
-                    || repo.profiles.iter().any(|profile| match profile {
-                        ah_core::Profile::Core => selected == "core",
-                        ah_core::Profile::Developer => selected == "developer",
-                        ah_core::Profile::Lead => selected == "lead",
-                    }))
-                .count(),
+            selected_profile.repositories.len(),
             f.deployments.len()
         );
         println!("WSL kernel: {wsl_status}");
@@ -241,6 +228,7 @@ fn install(o: InstallOptions) -> Result<()> {
         anyhow::bail!("shared home must contain AGENTS.md: {}", shared.display());
     }
     let import = format!("@{}", shared.join("AGENTS.md").display());
+    let profile = ah_agents::ProfileSelection::from_name(&c, selected)?;
     let actions = vec![
         ah_core::Action::Symlink {
             source: shared.to_string_lossy().into_owned(),
@@ -277,13 +265,23 @@ fn install(o: InstallOptions) -> Result<()> {
             })?;
         }
     }
+    let selected_repos = profile
+        .repositories
+        .iter()
+        .map(|repo| repo.name.as_str())
+        .collect::<Vec<_>>();
     let plan = planner.finish(o.dry_run);
     println!(
-        "{} install plan (profile: {selected})",
+        "{} install plan (profile: {selected}; eligible repositories: {})",
         if o.dry_run {
             "DRY RUN"
         } else {
             "Applying supported actions"
+        },
+        if selected_repos.is_empty() {
+            "none".to_owned()
+        } else {
+            selected_repos.join(", ")
         }
     );
     // Check all destinations before creating backups or executing any action.
@@ -418,6 +416,7 @@ fn install(o: InstallOptions) -> Result<()> {
     }
     m.save_atomic(&cfg.join("manifest.json"))?;
     println!("Manifest recorded: {}", cfg.join("manifest.json").display());
+    println!("Repository cloning is not implemented; listed repositories are informational only.");
     println!("Partial wiring: Claude and Codex only; other harnesses are not yet wired.");
     Ok(())
 }

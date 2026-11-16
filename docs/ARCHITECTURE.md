@@ -41,7 +41,7 @@ shared-home checkout
 ## Known limitations
 
 - Installation currently targets a local shared-home checkout. Private-team cloning/bootstrap and rollback across a partially failed multi-action install are not implemented.
-- Profile selection is recorded/reported and `doctor` lists repositories assigned to the selected profile; install wiring still does not apply profile-specific content.
+- Profile selection is recorded in the manifest; both `doctor` and `install` report the repositories assigned to the selected profile. Install does not clone or install those repositories yet, and currently links the shared skill set for all profiles. Repository entries in the install output are informational only.
 - Claude/Codex and discovered skill links are the only harness wiring. OpenCode, Copilot, Hermes, role-agent rendering, Foundry, and Herdr are not wired.
 - WSL detection exists, but Windows profile discovery, drvfs/OneDrive validation, `winget`, Obsidian, scheduled tasks, and Windows-side operations do not.
 - Vault scan is a heuristic check for common patterns, not a complete DLP/secret detector; absence of findings is not proof that a vault is secret-free.

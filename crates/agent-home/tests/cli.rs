@@ -176,6 +176,94 @@ profiles = []
 }
 
 #[test]
+fn install_records_the_selected_profile_and_keeps_shared_skills_for_every_profile() {
+    let temp = tempfile::tempdir().unwrap();
+    let home_repo = temp.path().join("shared-home");
+    std::fs::create_dir_all(home_repo.join("Agents/Skills")).unwrap();
+    std::fs::write(home_repo.join("AGENTS.md"), "# Shared instructions\n").unwrap();
+    std::fs::write(
+        home_repo.join("agent-home.toml"),
+        r#"schema = 1
+[team]
+name = "Example Team"
+org = "example-org"
+env_prefix = "EX"
+role_prefix = "ex-"
+[profiles]
+default = "developer"
+[[repos]]
+name = "core-only"
+url = "https://github.com/example-org/core-only.git"
+profiles = ["core"]
+[[repos]]
+name = "developer-only"
+url = "https://github.com/example-org/developer-only.git"
+profiles = ["developer"]
+[[repos]]
+name = "shared-repo"
+url = "https://github.com/example-org/shared-repo.git"
+profiles = []
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(home_repo.join("Agents/Skills/shared-skill")).unwrap();
+    std::fs::write(
+        home_repo.join("Agents/Skills/shared-skill/SKILL.md"),
+        "---\nname: shared-skill\ndescription: Shared example\n---\n",
+    )
+    .unwrap();
+
+    let root = temp.path().join("user-home");
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(&home_repo)
+        .args(["--profile", "core", "--root"])
+        .arg(&root)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "install plan (profile: core; eligible repositories: core-only, shared-repo)",
+        ))
+        .stdout(predicate::str::contains(
+            "Repository cloning is not implemented",
+        ));
+
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.join(".config/agent-home/manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["profile"], "core");
+    let skill = root.join(".agents/skills/shared-skill");
+    assert!(std::fs::symlink_metadata(&skill)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(
+        std::fs::read_link(skill).unwrap(),
+        home_repo
+            .canonicalize()
+            .unwrap()
+            .join("Agents/Skills/shared-skill")
+    );
+}
+
+#[test]
+fn install_rejects_unsupported_profile_before_mutating_user_home() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("user-home");
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--profile", "invalid", "--root"])
+        .arg(&root)
+        .assert()
+        .failure();
+    assert!(!root.exists());
+}
+
+#[test]
 fn install_fails_closed_on_a_collision_without_creating_backups_or_other_changes() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("user-home");

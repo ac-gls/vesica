@@ -1,7 +1,39 @@
-//! Per-agent wiring (Claude Code, OpenCode, Copilot CLI, Codex, Hermes), role rendering, Foundry model config.
+//! Profile-aware repository selection and per-agent skill discovery.
 
+use ah_core::{Profile, RepoConfig};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone)]
+pub struct ProfileSelection {
+    pub profile: Profile,
+    pub repositories: Vec<RepoConfig>,
+}
+
+impl ProfileSelection {
+    pub fn from_config(config: &ah_core::AgentHomeConfig, profile: Profile) -> Self {
+        let repositories = config
+            .repos
+            .iter()
+            .filter(|repo| repo.profiles.is_empty() || repo.profiles.contains(&profile))
+            .cloned()
+            .collect();
+        Self {
+            profile,
+            repositories,
+        }
+    }
+
+    pub fn from_name(config: &ah_core::AgentHomeConfig, name: &str) -> anyhow::Result<Self> {
+        let profile = match name {
+            "core" => Profile::Core,
+            "developer" => Profile::Developer,
+            "lead" => Profile::Lead,
+            _ => anyhow::bail!("unsupported Vesica profile: {name}"),
+        };
+        Ok(Self::from_config(config, profile))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skill {
@@ -36,6 +68,27 @@ pub fn discover_skills(root: &Path) -> Result<Vec<Skill>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_selection_includes_only_matching_or_shared_repositories() {
+        let config = ah_core::AgentHomeConfig::from_path(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/shared-home/agent-home.toml"),
+        )
+        .unwrap();
+        let selected = ProfileSelection::from_config(&config, Profile::Core);
+        assert!(selected.repositories.is_empty());
+        let developer = ProfileSelection::from_config(&config, Profile::Developer);
+        assert_eq!(
+            developer
+                .repositories
+                .iter()
+                .map(|repo| repo.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sample-app"]
+        );
+        assert!(ProfileSelection::from_name(&config, "unrecognized").is_err());
+    }
 
     #[test]
     fn discovers_skill_directories_deterministically_and_ignores_non_skills() {
