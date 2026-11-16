@@ -113,6 +113,17 @@ pub fn lint_shared_home(root: &std::path::Path) -> anyhow::Result<Vec<LintFindin
                     message: "personal filesystem path found",
                 });
             }
+            if email_address_pattern()
+                .find_iter(line)
+                .any(|m| valid_email_match(line, m.start(), m.end()))
+            {
+                findings.push(LintFinding {
+                    path: relative.clone(),
+                    line: line_no,
+                    rule: "VSH007",
+                    message: "email address found",
+                });
+            }
             let mut rest = line;
             while let Some(start) = rest.find("[[") {
                 let after = &rest[start + 2..];
@@ -184,6 +195,34 @@ pub fn lint_shared_home(root: &std::path::Path) -> anyhow::Result<Vec<LintFindin
             .then(a.rule.cmp(b.rule))
     });
     Ok(findings)
+}
+
+fn valid_email_match(line: &str, start: usize, end: usize) -> bool {
+    let candidate = &line[start..end];
+    let Some((local, domain)) = candidate.rsplit_once('@') else {
+        return false;
+    };
+    let local = local.trim_start_matches(|c: char| !c.is_ascii_alphanumeric());
+    let Some((_, tld)) = domain.rsplit_once('.') else {
+        return false;
+    };
+    !local.is_empty()
+        && !local.starts_with('.')
+        && !local.ends_with('.')
+        && !local.contains("..")
+        && domain
+            .split('.')
+            .all(|label| !label.is_empty() && !label.starts_with('-') && !label.ends_with('-'))
+        && tld.chars().all(|c| c.is_ascii_alphabetic())
+        && !line[end..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+}
+
+fn email_address_pattern() -> &'static regex::Regex {
+    static EMAIL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    EMAIL.get_or_init(|| {
+        regex::Regex::new(r"(?i)(?:^|[^\w.+-])[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,63}")
+            .expect("the email-address pattern is a compile-time constant")
+    })
 }
 
 /// Scan text files for common high-confidence credential patterns. Findings omit matched text.
