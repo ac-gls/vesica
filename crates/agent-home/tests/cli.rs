@@ -155,6 +155,29 @@ fn doctor_reports_wsl_kernel_detection_with_vesica_override() {
 }
 
 #[test]
+fn uninstall_uses_vesica_root_environment_variable() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    let config = root.join(".config/agent-home");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("manifest.json"),
+        r#"{"schema":1,"app_version":"0.1.0","shared_home":"","profile":"developer","entries":{}}"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["status"])
+        .env("VESICA_ROOT", &root)
+        .env("AGENT_HOME_ROOT", "/vesica-should-win-over-legacy")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(root.to_string_lossy().as_ref()))
+        .stdout(predicate::str::contains("(not installed)"));
+}
+
+#[test]
 fn doctor_fails_for_a_missing_shared_home() {
     Command::cargo_bin("vesica")
         .unwrap()

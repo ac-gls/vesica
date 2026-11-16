@@ -42,7 +42,7 @@ struct Options {
 struct InstallOptions {
     #[command(flatten)]
     options: Options,
-    #[arg(long, env = "AGENT_HOME_ROOT")]
+    #[arg(long, env = "AGENT_HOME_ROOT", env = "VESICA_ROOT")]
     root: Option<PathBuf>,
     #[arg(long)]
     dry_run: bool,
@@ -55,13 +55,13 @@ struct VaultScanOptions {
 
 #[derive(Debug, clap::Args)]
 struct RootOptions {
-    #[arg(long)]
+    #[arg(long, env = "AGENT_HOME_ROOT", env = "VESICA_ROOT")]
     root: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
 struct UninstallOptions {
-    #[arg(long, env = "AGENT_HOME_ROOT")]
+    #[arg(long, env = "AGENT_HOME_ROOT", env = "VESICA_ROOT")]
     root: Option<PathBuf>,
     #[arg(long)]
     dry_run: bool,
