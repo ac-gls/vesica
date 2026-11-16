@@ -10,7 +10,7 @@ struct Cli {
 }
 #[derive(Debug, Subcommand)]
 enum Command {
-    Doctor(Options),
+    Doctor(DoctorOptions),
     Install(InstallOptions),
     Status(RootOptions),
     Uninstall(UninstallOptions),
@@ -37,6 +37,13 @@ struct Options {
     home_repo: PathBuf,
     #[arg(long, value_enum)]
     profile: Option<ProfileArg>,
+}
+#[derive(Debug, clap::Args)]
+struct DoctorOptions {
+    #[command(flatten)]
+    options: Options,
+    #[arg(long)]
+    json: bool,
 }
 #[derive(Debug, clap::Args)]
 struct InstallOptions {
@@ -124,26 +131,41 @@ fn prof(o: &Options, c: &ah_core::AgentHomeConfig) -> &'static str {
             ah_core::Profile::Lead => "lead",
         })
 }
-fn doctor(o: &Options) -> Result<()> {
-    let (c, f) = load(o)?;
-    println!(
-        "Shared home: valid
+fn doctor(o: &DoctorOptions) -> Result<()> {
+    let (c, f) = load(&o.options)?;
+    let wsl = ah_wsl::is_wsl()?;
+    let wsl_status = if wsl { "detected" } else { "not detected" };
+    let selected = prof(&o.options, &c);
+    if o.json {
+        let report = serde_json::json!({
+            "shared_home": "valid",
+            "team": {"name": c.team.name, "org": c.team.org},
+            "profile": selected,
+            "repos_in_config": c.repos.len(),
+            "foundry_deployments": f.deployments.len(),
+            "wsl_kernel": wsl_status,
+            "live_harness": "not-implemented",
+            "foundry": "not-implemented",
+            "windows": "not-implemented",
+            "herdr": "not-implemented"
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "Shared home: valid
 Team: {} ({})
 Profile: {}
 Repos in config: {}
 Foundry deployments: {}",
-        c.team.name,
-        c.team.org,
-        prof(o, &c),
-        c.repos.len(),
-        f.deployments.len()
-    );
-    let wsl = ah_wsl::is_wsl()?;
-    println!(
-        "WSL kernel: {}",
-        if wsl { "detected" } else { "not detected" }
-    );
-    println!("Live harness, Foundry, Windows and Herdr checks are not implemented.");
+            c.team.name,
+            c.team.org,
+            selected,
+            c.repos.len(),
+            f.deployments.len()
+        );
+        println!("WSL kernel: {wsl_status}");
+        println!("Live harness, Foundry, Windows and Herdr checks are not implemented.");
+    }
     Ok(())
 }
 fn install(o: InstallOptions) -> Result<()> {

@@ -60,6 +60,26 @@ fn doctor_validates_the_shared_home_and_reports_selected_profile() {
 }
 
 #[test]
+fn doctor_json_emits_machine_readable_shared_home_and_wsl_status() {
+    let output = Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["doctor", "--json", "--home-repo"])
+        .arg(fixture_home())
+        .env("VESICA_ALLOW_NON_WSL", "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["shared_home"], "valid");
+    assert_eq!(report["team"]["name"], "Example Team");
+    assert_eq!(report["team"]["org"], "example-org");
+    assert_eq!(report["profile"], "developer");
+    assert_eq!(report["wsl_kernel"], "detected");
+    assert_eq!(report["live_harness"], "not-implemented");
+    assert_eq!(report["foundry"], "not-implemented");
+}
+
+#[test]
 fn doctor_prefers_vesica_environment_variables_over_legacy_names() {
     Command::cargo_bin("vesica")
         .unwrap()
