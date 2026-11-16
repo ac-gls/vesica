@@ -4,7 +4,7 @@
 ## Current executable flow
 ```text
 vesica CLI
-  ├─ doctor   parse team config + optional Foundry catalog; report selected profile
+  ├─ doctor   parse team config/catalog; report WSL status and optional --json report
   ├─ install  build a plan; preflight destinations/manifest; back up existing
   │           Claude/Codex instruction files; execute supported actions; save manifest
   ├─ status   read the install manifest and report recorded entries

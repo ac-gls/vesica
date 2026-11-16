@@ -8,7 +8,7 @@ The installed program and CLI are named `vesica`; the public repository/download
 
 ## What currently works
 
-- `doctor` parses and validates a local shared-home `agent-home.toml` and optional `foundry.catalog.json`.
+- `doctor` parses and validates a local shared-home `agent-home.toml` and optional `foundry.catalog.json`, reports WSL kernel detection, and supports machine-readable `--json` output. It does not probe live harness, Foundry, Windows interop or Herdr.
 - `install --dry-run` prints the supported install plan without mutating the chosen home.
 - `install` links the local shared home at `~/Team` (or an explicit test root), adds managed imports to Claude Code and Codex instruction files, and links discovered skill directories to `.agents/skills` and `.claude/skills`.
 - `status` inspects the installer manifest.
@@ -33,6 +33,7 @@ Use a disposable directory, not the real home, first:
 
 ```sh
 cargo run -p vesica -- doctor --home-repo tests/fixtures/shared-home
+cargo run -p vesica -- doctor --json --home-repo tests/fixtures/shared-home
 cargo run -p vesica -- install --home-repo tests/fixtures/shared-home --root /tmp/vesica-test --dry-run
 ```
 
