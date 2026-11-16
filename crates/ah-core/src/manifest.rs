@@ -1,5 +1,11 @@
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::Path;
 
 use crate::Action;
@@ -57,10 +63,28 @@ impl Manifest {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let bytes = serde_json::to_vec_pretty(self)?;
         let temporary = path.with_extension("json.tmp");
-        std::fs::write(&temporary, bytes)?;
-        std::fs::rename(temporary, path)?;
+        let bytes = serde_json::to_vec_pretty(self)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        #[cfg(windows)]
+        options.share_mode(0);
+        let mut file = options
+            .open(&temporary)
+            .with_context(|| format!("creating manifest temp file {}", temporary.display()))?;
+        if let Err(error) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
+            drop(file);
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error)
+                .with_context(|| format!("writing manifest temp file {}", temporary.display()));
+        }
+        drop(file);
+        if let Err(error) = std::fs::rename(&temporary, path) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error).with_context(|| format!("replacing manifest {}", path.display()));
+        }
         Ok(())
     }
 
@@ -76,6 +100,74 @@ impl Manifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_sets_restrictive_permissions_on_unix() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("manifest.json");
+            Manifest::default().save_atomic(&path).unwrap();
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn save_fails_without_following_or_replacing_manifest_temp_symlink() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("state/manifest.json");
+            let outside = dir.path().join("outside.json");
+            std::fs::write(&outside, "user-owned target").unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            symlink(&outside, path.with_extension("json.tmp")).unwrap();
+
+            assert!(Manifest::default().save_atomic(&path).is_err());
+            assert_eq!(std::fs::read(outside).unwrap(), b"user-owned target");
+            assert!(std::fs::symlink_metadata(path.with_extension("json.tmp"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
+    fn save_does_not_overwrite_a_concurrent_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state/manifest.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let temporary = path.with_extension("json.tmp");
+        std::fs::write(&temporary, "user-owned temp").unwrap();
+
+        assert!(Manifest::default().save_atomic(&path).is_err());
+        assert_eq!(std::fs::read(&temporary).unwrap(), b"user-owned temp");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn save_preserves_the_existing_manifest_when_commit_cannot_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manifest.json");
+        let existing = b"existing valid-enough bytes";
+        std::fs::write(&path, existing).unwrap();
+        std::fs::write(path.with_extension("json.tmp"), "temp blocker").unwrap();
+
+        assert!(Manifest::default().save_atomic(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), existing);
+        assert_eq!(
+            std::fs::read(path.with_extension("json.tmp")).unwrap(),
+            b"temp blocker"
+        );
+    }
 
     #[test]
     fn saves_and_loads_a_manifest_atomically() {
