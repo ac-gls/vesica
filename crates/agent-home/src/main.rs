@@ -389,6 +389,12 @@ fn install(o: InstallOptions) -> Result<()> {
         for action in &plan.actions {
             if let Some(existing) = old.entries.get(action.key()) {
                 if let Some(path) = existing.backup.as_deref() {
+                    let metadata = std::fs::symlink_metadata(path).with_context(|| {
+                        format!("recorded backup is missing or unreadable: {path}")
+                    })?;
+                    if !metadata.is_file() || metadata.file_type().is_symlink() {
+                        anyhow::bail!("recorded backup is not a regular file: {path}");
+                    }
                     let expected = existing
                         .original_sha256
                         .as_deref()

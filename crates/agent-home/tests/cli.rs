@@ -555,6 +555,60 @@ fn reinstall_refuses_to_use_a_modified_recorded_backup() {
 }
 
 #[test]
+fn reinstall_refuses_to_follow_a_symlink_at_recorded_backup() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("user-home");
+        let claude = root.join(".claude/CLAUDE.md");
+        std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+        std::fs::write(&claude, "user-authored Claude rules\n").unwrap();
+        let run = || {
+            Command::cargo_bin("vesica")
+                .unwrap()
+                .args(["install", "--home-repo"])
+                .arg(fixture_home())
+                .args(["--profile", "developer", "--root"])
+                .arg(&root)
+                .output()
+                .unwrap()
+        };
+        assert!(run().status.success());
+        let installed = std::fs::read(&claude).unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join(".config/agent-home/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        let backup = std::path::PathBuf::from(
+            manifest["entries"][claude.to_string_lossy().as_ref()]["backup"]
+                .as_str()
+                .unwrap(),
+        );
+        let outside = temp.path().join("outside-user-file");
+        std::fs::write(&outside, "outside file must never be followed").unwrap();
+        std::fs::remove_file(&backup).unwrap();
+        symlink(&outside, &backup).unwrap();
+
+        let second = run();
+        assert!(!second.status.success(), "backup symlink must fail closed");
+        let diagnostic = String::from_utf8_lossy(&second.stdout).to_string()
+            + &String::from_utf8_lossy(&second.stderr);
+        assert!(diagnostic.contains("recorded backup is not a regular file"));
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"outside file must never be followed"
+        );
+        assert_eq!(std::fs::read(&claude).unwrap(), installed);
+        assert!(std::fs::symlink_metadata(&backup)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+}
+
+#[test]
 fn doctor_confirms_installed_fixture_from_selected_root() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("home");
