@@ -14,6 +14,14 @@ curl -fsSL https://raw.githubusercontent.com/ac-gls/agent-home/v0.1.0/install.sh
 vesica doctor
 ```
 
+For a read-only validation pass against a local shared home:
+
+```bash
+vesica lint --home-repo /path/to/shared-home
+```
+
+Finding output includes relative paths, line numbers and rule IDs; it deliberately omits document contents and matched credential text. The linter is heuristic and does not establish production readiness.
+
 Nothing is overwritten: supported installer changes are limited to managed imports and symlinks recorded in
 `~/.config/agent-home/manifest.json`. Uninstall verifies recorded content and preserves entries it cannot
 safely verify. This remains a prototype; see the onboarding and architecture notes before trying it.

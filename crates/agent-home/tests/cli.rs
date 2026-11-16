@@ -28,6 +28,35 @@ fn help_displays_vesica_as_the_binary_name() {
 }
 
 #[test]
+fn lint_reports_findings_without_echoing_secret_values() {
+    let temp = tempfile::tempdir().unwrap();
+    let marker = format!("ghp_{}", "B".repeat(32));
+    std::fs::write(temp.path().join("AGENTS.md"), format!("{marker}\n")).unwrap();
+    let output = Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["lint", "--home-repo"])
+        .arg(temp.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let report = String::from_utf8_lossy(&output.stdout).to_string()
+        + &String::from_utf8_lossy(&output.stderr);
+    assert!(report.contains("AGENTS.md:1:VSH006"));
+    assert!(!report.contains(&marker));
+}
+
+#[test]
+fn lint_accepts_the_fixture_home_from_the_cli() {
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["lint", "--home-repo"])
+        .arg(fixture_home())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No lint findings"));
+}
+
+#[test]
 fn vault_scan_fails_on_secret_patterns_without_echoing_matched_values() {
     let temp = tempfile::tempdir().unwrap();
     let note = temp.path().join("note.md");

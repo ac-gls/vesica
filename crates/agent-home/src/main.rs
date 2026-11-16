@@ -14,6 +14,7 @@ enum Command {
     Install(InstallOptions),
     Status(RootOptions),
     Uninstall(UninstallOptions),
+    Lint(LintOptions),
     VaultScan(VaultScanOptions),
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -66,6 +67,17 @@ struct VaultScanOptions {
 }
 
 #[derive(Debug, clap::Args)]
+struct LintOptions {
+    #[arg(
+        long,
+        env = "VESICA_HOME_REPO",
+        env = "AGENT_HOME_REPO",
+        help = "Shared-home repository to lint"
+    )]
+    home_repo: PathBuf,
+}
+
+#[derive(Debug, clap::Args)]
 struct RootOptions {
     #[arg(long, env = "AGENT_HOME_ROOT", env = "VESICA_ROOT")]
     root: Option<PathBuf>,
@@ -90,9 +102,29 @@ fn run(cli: Cli) -> Result<()> {
         Command::Install(o) => install(o),
         Command::Status(o) => status(o.root.as_deref()),
         Command::Uninstall(o) => uninstall(o.root.as_deref(), o.dry_run),
+        Command::Lint(o) => lint(&o.home_repo),
         Command::VaultScan(o) => vault_scan(&o.path),
     }
 }
+fn lint(path: &Path) -> Result<()> {
+    let findings = ah_vault::lint_shared_home(path)
+        .with_context(|| format!("cannot lint shared home {}", path.display()))?;
+    if findings.is_empty() {
+        println!("No lint findings under {}", path.display());
+        return Ok(());
+    }
+    for finding in &findings {
+        println!(
+            "{}:{}:{}: {}",
+            finding.path.display(),
+            finding.line,
+            finding.rule,
+            finding.message
+        );
+    }
+    anyhow::bail!("{} lint finding(s)", findings.len())
+}
+
 fn vault_scan(path: &Path) -> Result<()> {
     let findings = ah_vault::scan_secrets(path)?;
     if findings.is_empty() {

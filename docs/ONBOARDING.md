@@ -1,10 +1,10 @@
-# Agent Home Kit Onboarding
+# Vesica Onboarding
 
-> **Prototype notice:** This checkout has working local install/status/uninstall slices, not the complete team setup. Do not follow the aspirational bootstrap example in the top-level README as a production-ready procedure yet. Foundry access and private shared-home repository access are external prerequisites and remain unresolved.
+> **Prototype notice:** Vesica is the product name; Agent Home Kit is the historical plan name. This checkout has working local install/status/uninstall slices, not the complete team setup. Do not follow the aspirational bootstrap example in the top-level README as a production-ready procedure yet. Foundry access and private shared-home repository access are external prerequisites and remain unresolved.
 
 ## Vesica rename and compatibility
 
-The installed program and CLI are named `vesica`; the public repository/download URL remains `ac-gls/agent-home`. The shared-home config stays `agent-home.toml`. To avoid orphaning existing install records, the manifest continues at `~/.config/agent-home/manifest.json`, and existing `AGENT_HOME_REPO`, `AGENT_HOME_ROOT`, and `AGENT_HOME_ALLOW_NON_WSL` variables remain accepted. The bootstrap accepts `VESICA_*` variables first, with legacy variable fallback. Uninstall handles both historical `agent-home` blocks and new `vesica` blocks. This identity change does not migrate an existing installation directory.
+**The installed program and CLI are named `vesica`;** the historical project/plan/repository may be called Agent Home Kit or Agent Home. The public repository/download URL remains `ac-gls/agent-home`. The shared-home config stays `agent-home.toml`. To avoid orphaning existing install records, the manifest continues at `~/.config/agent-home/manifest.json`, and existing `AGENT_HOME_REPO`, `AGENT_HOME_ROOT`, and `AGENT_HOME_ALLOW_NON_WSL` variables remain accepted. The bootstrap accepts `VESICA_*` variables first, with legacy variable fallback. Uninstall handles both historical `agent-home` blocks and new `vesica` blocks. This identity change does not migrate an existing installation directory.
 
 ## What currently works
 
@@ -13,6 +13,7 @@ The installed program and CLI are named `vesica`; the public repository/download
 - `install` links the local shared home at `~/Team` (or an explicit test root), adds managed imports to Claude Code and Codex instruction files, and links discovered skill directories to `.agents/skills` and `.claude/skills`.
 - `status` inspects the installer manifest.
 - `uninstall` removes or restores only entries that pass verification; modified or unverifiable entries are retained.
+- `lint --home-repo <path>` checks a local shared-home checkout (area README coverage, size cap, unresolved internal wiki links, personal paths and common secrets). Findings contain relative paths, line, stable rule ID and fixed message only—not matched text. This is heuristic and not a complete DLP or policy validator.
 - `vault-scan --path <directory>` flags common credential patterns by path and line without printing matched values.
 
 ## Build and test locally
@@ -49,6 +50,7 @@ A match prints only file and line, returns a non-zero exit, and intentionally do
 
 ## Current scope gaps
 
-The CLI does not yet perform a private team-home clone, profile-specific install selection/rendering (the `doctor` report now lists matching repositories), complete OpenCode/Copilot/Hermes wiring, role-agent generation, Foundry setup/auth probes, Herdr orchestration, Windows interoperability, update, signed release verification, vault policy/lint, or transactional rollback of a partially applied plan. `doctor` explicitly says the live harness, Foundry, Windows, and Herdr checks are not implemented.
+- `lint --home-repo <path>` validates Knowledge/Decisions/Templates README coverage, 1 MB file limit, internal wiki links and personal paths, and invokes the common-pattern credential scanner. Diagnostics contain relative paths, line numbers and stable rule IDs, never matched text. This is heuristic, not full vault-policy or DLP coverage.
+- The CLI does not yet perform a private team-home clone, profile-specific install selection/rendering (the `doctor` report lists matching repositories), complete OpenCode/Copilot/Hermes wiring, role-agent generation, Foundry setup/auth probes, Herdr orchestration, Windows interoperability, update, signed release verification, or transactional rollback of a partially applied plan. `doctor` explicitly says live harness, Foundry, Windows and Herdr checks are not implemented.
 
 Before a real pilot: resolve the private repo/org permissions and Foundry prerequisite, finish implementation and tests for the missing integrations, run dogfood on Windows+WSL with a disposable profile, verify CI/release artifacts, and obtain explicit release approval.

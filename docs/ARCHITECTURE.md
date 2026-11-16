@@ -1,6 +1,6 @@
-# Agent Home Kit Architecture
+# Vesica Architecture
 
-> **Status: prototype / incomplete.** This document describes the code that exists in this checkout, not the aspirational multi-agent installer described in older planning notes. Do not use it to install a production team setup yet.
+> **Status: prototype / incomplete.** Vesica is the renamed product identity of the historical Agent Home Kit project; paths and repo names retain compatibility identifiers. This document describes the code that exists in this checkout, not the aspirational multi-agent installer described in older planning notes. Do not use it to install a production team setup yet.
 ## Current executable flow
 ```text
 vesica CLI
@@ -9,7 +9,8 @@ vesica CLI
   │           Claude/Codex instruction files; execute supported actions; save manifest
   ├─ status   read the install manifest and report recorded entries
   ├─ uninstall verify hashes/links, then remove or restore only managed entries
-  └─ vault-scan recursively check bounded-size UTF-8 files for common secret patterns
+  ├─ lint     read-only shared-home checks with secret-safe diagnostics
+  ├─ vault-scan recursively check bounded-size UTF-8 files for common secret patterns
 
 shared-home checkout
   ├─ AGENTS.md                         → ~/Team symlink
@@ -22,7 +23,7 @@ shared-home checkout
 - `ah-config`: JSONC/TOML recursive merges, managed text blocks, safe symlink primitive.
 - `ah-core`: team/catalog parsing and validation, action planner/executor, manifest model.
 - `ah-agents`: deterministic discovery of skill directories containing `SKILL.md`.
-- `ah-vault`: bounded common-credential pattern scanner. It reports file and line, never matched text.
+- `ah-vault`: bounded common-credential pattern scanner and read-only shared-home lint (area README coverage, size cap, local wikilinks, personal paths, secret-safe findings).
 - `ah-wsl`: WSL kernel detection and a CI override; no Windows interop installer steps yet.
 - `ah-herdr`: placeholder only; runtime client is not implemented.
 - `vesica`: currently wires the limited workflows listed above.
