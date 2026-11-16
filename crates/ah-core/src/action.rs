@@ -348,6 +348,61 @@ mod tests {
     }
 
     #[test]
+    fn apply_failure_restores_updated_toml_exactly() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("settings.toml");
+        let blocked = temp.path().join("blocked");
+        let original = "# preserve comment\n[existing]\nvalue = 1\n";
+        std::fs::write(&config, original).unwrap();
+        std::fs::write(&blocked, "not a directory").unwrap();
+        let plan = Plan {
+            actions: vec![
+                Action::MergeToml {
+                    path: config.display().to_string(),
+                    patch: serde_json::json!({"managed": {"enabled": true}}),
+                },
+                Action::WriteFile {
+                    path: blocked.join("cannot-write.txt").display().to_string(),
+                    content: "unreachable".into(),
+                },
+            ],
+            dry_run: false,
+        };
+
+        assert!(Executor.execute(&plan).is_err());
+        assert_eq!(std::fs::read(&config).unwrap(), original.as_bytes());
+    }
+
+    #[test]
+    fn apply_failure_preserves_user_owned_symlink_and_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        let blocked = temp.path().join("blocked");
+        std::fs::write(&target, "user target").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &source).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&target, &source).unwrap();
+        std::fs::write(&blocked, "not a directory").unwrap();
+        let plan = Plan {
+            actions: vec![
+                Action::Symlink {
+                    source: source.display().to_string(),
+                    destination: temp.path().join("existing-link").display().to_string(),
+                },
+                Action::WriteFile {
+                    path: blocked.join("cannot-write.txt").display().to_string(),
+                    content: "unreachable".into(),
+                },
+            ],
+            dry_run: false,
+        };
+        assert!(Executor.execute(&plan).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"user target");
+    }
+
+    #[test]
     fn apply_failure_restores_updated_file_byte_for_byte() {
         let temp = tempfile::tempdir().unwrap();
         let config = temp.path().join("settings.jsonc");
