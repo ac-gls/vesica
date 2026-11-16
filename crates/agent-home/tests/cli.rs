@@ -92,6 +92,61 @@ fn doctor_prefers_vesica_environment_variables_over_legacy_names() {
 }
 
 #[test]
+fn doctor_json_applies_requested_profile_to_repository_listing() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("agent-home.toml");
+    std::fs::write(
+        &config,
+        r#"schema = 1
+[team]
+name = "Example Team"
+org = "example-org"
+env_prefix = "EX"
+role_prefix = "ex-"
+[profiles]
+default = "developer"
+[[repos]]
+name = "core-only"
+url = "https://github.com/example-org/core-only.git"
+profiles = ["core"]
+[[repos]]
+name = "dev-lead"
+url = "https://github.com/example-org/dev-lead.git"
+profiles = ["developer", "lead"]
+[[repos]]
+name = "all-profiles"
+url = "https://github.com/example-org/all.git"
+profiles = []
+"#,
+    )
+    .unwrap();
+
+    for (profile, expected) in [
+        ("core", vec!["core-only", "all-profiles"]),
+        ("developer", vec!["dev-lead", "all-profiles"]),
+        ("lead", vec!["dev-lead", "all-profiles"]),
+    ] {
+        let output = Command::cargo_bin("vesica")
+            .unwrap()
+            .args(["doctor", "--json", "--home-repo"])
+            .arg(temp.path())
+            .args(["--profile", profile])
+            .env("VESICA_ALLOW_NON_WSL", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["profile"], profile);
+        assert_eq!(report["repos_in_config"], 3);
+        assert_eq!(report["repos"], serde_json::json!(expected));
+    }
+}
+
+#[test]
 fn install_fails_closed_on_a_collision_without_creating_backups_or_other_changes() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("user-home");

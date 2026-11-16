@@ -147,6 +147,13 @@ fn doctor(o: &DoctorOptions) -> Result<()> {
             "team": {"name": c.team.name, "org": c.team.org},
             "profile": selected,
             "repos_in_config": c.repos.len(),
+            "repos": c.repos.iter().filter(|repo| {
+                repo.profiles.is_empty() || repo.profiles.iter().any(|profile| match profile {
+                    ah_core::Profile::Core => selected == "core",
+                    ah_core::Profile::Developer => selected == "developer",
+                    ah_core::Profile::Lead => selected == "lead",
+                })
+            }).map(|repo| repo.name.as_str()).collect::<Vec<_>>(),
             "foundry_deployments": f.deployments.len(),
             "wsl_kernel": wsl_status,
             "live_harness": "not-implemented",
@@ -161,11 +168,20 @@ fn doctor(o: &DoctorOptions) -> Result<()> {
 Team: {} ({})
 Profile: {}
 Repos in config: {}
-Foundry deployments: {}",
+Repos for profile: {}\nFoundry deployments: {}",
             c.team.name,
             c.team.org,
             selected,
             c.repos.len(),
+            c.repos
+                .iter()
+                .filter(|repo| repo.profiles.is_empty()
+                    || repo.profiles.iter().any(|profile| match profile {
+                        ah_core::Profile::Core => selected == "core",
+                        ah_core::Profile::Developer => selected == "developer",
+                        ah_core::Profile::Lead => selected == "lead",
+                    }))
+                .count(),
             f.deployments.len()
         );
         println!("WSL kernel: {wsl_status}");
