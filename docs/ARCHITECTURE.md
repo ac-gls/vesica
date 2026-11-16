@@ -28,11 +28,11 @@ shared-home checkout
 - `ah-herdr`: placeholder only; runtime client is not implemented.
 - `vesica`: currently wires the limited workflows listed above.
 
-### Safety and transaction
+## Safety and transaction
 
 The CLI preflights unsafe state paths. Installer mutations, backup creation, and manifest persistence now share a best-effort rollback transaction. Manifest writes use exclusive temporary-file creation, syncing before atomic replacement, and mode `0600` for new Unix manifests. Backups are created exclusively and only removed on transaction failure if their bytes remain unchanged; cleanup/rollback errors are included in the reported failure. Tests cover manifest temp-file and symlink collisions, user-content preservation, and CLI install rollback.
 
-### Validation
+## Validation
 
 - `cargo fmt --all -- --check`
 - `cargo test --workspace --quiet`
@@ -57,12 +57,12 @@ These are local WSL/Linux results. Windows compilation/replacement behavior and 
 ## Known limitations
 
 - `bash tests/install.sh` builds a disposable fixture release and checks bootstrap-only installation, preservation of spaced CLI arguments, and checksum rejection without side effects. It is network-free; CI runs it alongside shellcheck. It does not establish the plan's complete install → doctor → idempotent reinstall parity acceptance.
-- Private-team cloning/bootstrap and rollback across a partially failed multi-action install are not implemented.
+- Private-team cloning/bootstrap remains incomplete; rollback covers bounded installer action/manifest failure cases only.
 - Profile selection is recorded in the manifest; both `doctor` and `install` report the repositories assigned to the selected profile. Install does not clone or install those repositories yet, and currently links the shared skill set for all profiles. Repository entries in the install output are informational only.
 - Claude/Codex and discovered skill links are the only harness wiring. OpenCode, Copilot, Hermes, role-agent rendering, Foundry, and Herdr are not wired.
 - WSL detection exists, but Windows profile discovery, drvfs/OneDrive validation, `winget`, Obsidian, scheduled tasks, and Windows-side operations do not.
 - Vault scan is a heuristic check for common patterns, not a complete DLP/secret detector; absence of findings is not proof that a vault is secret-free.
-- No signed release/update path, full rollback transaction, or end-to-end Windows+WSL dogfood validation is implemented.
+- No signed release/update path or end-to-end Windows+WSL dogfood validation is implemented; rollback remains bounded to the tested action/manifest failure cases above.
 
 ## Verification
 
