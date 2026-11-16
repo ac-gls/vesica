@@ -15,7 +15,7 @@ fn lint_accepts_the_shared_home_fixture() {
 fn lint_reports_missing_readme_with_safe_path_and_rule_code() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(temp.path().join("Knowledge/Guides")).unwrap();
-    std::fs::write(temp.path().join("Knowledge/README.md"), "# Knowledge\\n").unwrap();
+    std::fs::write(temp.path().join("Knowledge/README.md"), "# Knowledge\n").unwrap();
     let findings = lint_shared_home(temp.path()).unwrap();
     assert!(findings.iter().any(|finding| {
         finding.rule == "VSH001" && finding.path == std::path::Path::new("Knowledge/Guides")

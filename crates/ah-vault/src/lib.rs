@@ -42,32 +42,33 @@ pub fn lint_shared_home(root: &std::path::Path) -> anyhow::Result<Vec<LintFindin
             ));
         }
     }
-    let file_paths: BTreeSet<String> = files
+    let mut all_paths: BTreeSet<String> = files
         .iter()
-        .map(|(relative, _, _)| relative.to_string_lossy().replace('\\', "/"))
+        .map(|(p, _, _)| p.to_string_lossy().replace('\\', "/"))
         .collect();
-    let markdown_paths: BTreeSet<String> = files
+    all_paths.extend(
+        directories
+            .iter()
+            .map(|p| p.to_string_lossy().replace('\\', "/")),
+    );
+    let markdown: BTreeSet<String> = files
         .iter()
-        .filter(|(relative, _, _)| relative.extension().is_some_and(|ext| ext == "md"))
-        .map(|(relative, _, _)| relative.to_string_lossy().replace('\\', "/"))
+        .filter(|(p, _, _)| p.extension().is_some_and(|e| e == "md"))
+        .map(|(p, _, _)| p.to_string_lossy().replace('\\', "/"))
         .collect();
-
     for directory in &directories {
-        let components: Vec<String> = directory
-            .components()
-            .filter_map(|component| component.as_os_str().to_str().map(str::to_owned))
-            .collect();
-        let is_area = components
-            .first()
-            .is_some_and(|part| matches!(part.as_str(), "Knowledge" | "Decisions" | "Templates"));
-        if !is_area || components.len() < 2 {
+        let mut components = directory.components();
+        let area = components
+            .next()
+            .and_then(|c| c.as_os_str().to_str())
+            .is_some_and(|p| matches!(p, "Knowledge" | "Decisions" | "Templates"));
+        if !area || components.next().is_none() {
             continue;
         }
-        let has_readme = files.iter().any(|(path, _, _)| {
-            path.parent() == Some(directory.as_path())
-                && path.file_name().is_some_and(|name| name == "README.md")
-        });
-        if !has_readme {
+        if !files.iter().any(|(p, _, _)| {
+            p.parent() == Some(directory.as_path())
+                && p.file_name().is_some_and(|n| n == "README.md")
+        }) {
             findings.push(LintFinding {
                 path: directory.clone(),
                 line: 0,
@@ -76,7 +77,6 @@ pub fn lint_shared_home(root: &std::path::Path) -> anyhow::Result<Vec<LintFindin
             });
         }
     }
-
     for (relative, full, size) in &files {
         let rel = relative.to_string_lossy().replace('\\', "/");
         if *size > 1_000_000 {
@@ -88,20 +88,23 @@ pub fn lint_shared_home(root: &std::path::Path) -> anyhow::Result<Vec<LintFindin
             });
             continue;
         }
-        let lower = rel.to_ascii_lowercase();
-        if lower.starts_with(".git/") || lower.starts_with(".obsidian/") {
-            continue;
-        }
-        if relative.extension().is_none_or(|ext| ext != "md") {
+        if rel.starts_with(".git/")
+            || rel.starts_with(".obsidian/")
+            || relative.extension().is_none_or(|e| e != "md")
+        {
             continue;
         }
         let bytes = std::fs::read(full)?;
         let Ok(text) = std::str::from_utf8(&bytes) else {
             continue;
         };
-        for (line_index, line) in text.lines().enumerate() {
-            let line_no = line_index + 1;
-            if line.contains("/mnt/") || line.contains("/home/") || line.contains("C:\\\\Users\\\\")
+        for (i, line) in text.lines().enumerate() {
+            let line_no = i + 1;
+            let lower = line.to_ascii_lowercase();
+            if line.contains("/mnt/")
+                || line.contains("/home/")
+                || lower.contains("c:/users/")
+                || lower.contains("\\\\users\\\\")
             {
                 findings.push(LintFinding {
                     path: relative.clone(),
@@ -125,23 +128,32 @@ pub fn lint_shared_home(root: &std::path::Path) -> anyhow::Result<Vec<LintFindin
                     .unwrap_or("")
                     .trim();
                 if !target.is_empty() {
-                    let target_path = std::path::Path::new(target);
-                    let resolved = if target_path.extension().is_some() {
+                    let resolved = if std::path::Path::new(target).extension().is_some() {
                         target.to_owned()
                     } else {
                         format!("{target}.md")
                     };
-                    let parent = relative
+                    let candidate = relative
                         .parent()
-                        .unwrap_or_else(|| std::path::Path::new(""));
-                    let candidate = parent.join(&resolved).to_string_lossy().replace('\\', "/");
-                    let rooted = std::path::Path::new(&resolved)
+                        .unwrap_or_else(|| std::path::Path::new(""))
+                        .join(&resolved)
                         .to_string_lossy()
                         .replace('\\', "/");
-                    if !markdown_paths.contains(&candidate)
-                        && !markdown_paths.contains(&rooted)
-                        && !file_paths.contains(&candidate)
-                        && !file_paths.contains(&rooted)
+                    let rooted = resolved.replace('\\', "/");
+                    let alias = candidate
+                        .strip_suffix("/README.md")
+                        .or_else(|| candidate.strip_suffix(".md"))
+                        .unwrap_or(&candidate);
+                    let rooted_alias = rooted
+                        .strip_suffix("/README.md")
+                        .or_else(|| rooted.strip_suffix(".md"))
+                        .unwrap_or(&rooted);
+                    if !markdown.contains(&candidate)
+                        && !markdown.contains(&rooted)
+                        && !all_paths.contains(&candidate)
+                        && !all_paths.contains(&rooted)
+                        && !all_paths.contains(alias)
+                        && !all_paths.contains(rooted_alias)
                     {
                         findings.push(LintFinding {
                             path: relative.clone(),

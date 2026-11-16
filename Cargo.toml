@@ -15,7 +15,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.100"
 license = "MIT"
-repository = "https://github.com/ac-gls/agent-home"
+repository = "https://github.com/ac-gls/vesica"
 authors = ["Aaron Clayton"]
 
 [workspace.dependencies]

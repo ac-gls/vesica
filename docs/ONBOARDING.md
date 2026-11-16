@@ -4,7 +4,7 @@
 
 ## Vesica rename and compatibility
 
-**The installed program and CLI are named `vesica`;** the historical project/plan/repository may be called Agent Home Kit or Agent Home. The public repository/download URL remains `ac-gls/agent-home`. The shared-home config stays `agent-home.toml`. To avoid orphaning existing install records, the manifest continues at `~/.config/agent-home/manifest.json`, and existing `AGENT_HOME_REPO`, `AGENT_HOME_ROOT`, and `AGENT_HOME_ALLOW_NON_WSL` variables remain accepted. The bootstrap accepts `VESICA_*` variables first, with legacy variable fallback. Uninstall handles both historical `agent-home` blocks and new `vesica` blocks. This identity change does not migrate an existing installation directory.
+**The installed program and CLI are named `vesica`;** the historical project/plan/repository may be called Agent Home Kit or Agent Home. The public repository/download URL remains `ac-gls/vesica`. The shared-home config stays `agent-home.toml`. To avoid orphaning existing install records, the manifest continues at `~/.config/agent-home/manifest.json`, and existing `AGENT_HOME_REPO`, `AGENT_HOME_ROOT`, and `AGENT_HOME_ALLOW_NON_WSL` variables remain accepted. The bootstrap accepts `VESICA_*` variables first, with legacy variable fallback. Uninstall handles both historical `agent-home` blocks and new `vesica` blocks. This identity change does not migrate an existing installation directory.
 
 ## What currently works
 

@@ -2,7 +2,7 @@
 # vesica bootstrap: download the pinned release binary, verify its sha256, install it to
 # ~/.local/bin, then hand over to `vesica install "$@"`. Everything else lives in the binary.
 #
-#   curl -fsSL https://raw.githubusercontent.com/ac-gls/agent-home/v0.1.0/install.sh \
+#   curl -fsSL https://raw.githubusercontent.com/ac-gls/vesica/v0.1.0/install.sh \
 #     | sh -s -- --home-repo <owner/repo> --profile developer
 #
 # Bootstrap-only options (consumed here, not passed on):
@@ -11,7 +11,7 @@
 set -eu
 
 VERSION="${VESICA_VERSION:-${AGENT_HOME_VERSION:-v0.1.0}}"
-REPO="${VESICA_REPO:-${AGENT_HOME_REPO:-ac-gls/agent-home}}"
+REPO="${VESICA_REPO:-${AGENT_HOME_REPO:-ac-gls/vesica}}"
 BIN_DIR="${VESICA_BIN_DIR:-${AGENT_HOME_BIN_DIR:-$HOME/.local/bin}}"
 ASSET="vesica-${VERSION}-x86_64-linux.tar.gz"
 FROM_FILE=""

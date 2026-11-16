@@ -9,7 +9,7 @@ use as shared memory.
 separate (usually private) **shared home** repository that the installer clones into your vault at `Team/`.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ac-gls/agent-home/v0.1.0/install.sh \
+curl -fsSL https://raw.githubusercontent.com/ac-gls/vesica/v0.1.0/install.sh \
   | sh -s -- --home-repo <owner>/<shared-home> --profile developer
 vesica doctor
 ```
