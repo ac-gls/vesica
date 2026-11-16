@@ -17,6 +17,16 @@ fn cli_identifies_itself_as_vesica() {
 }
 
 #[test]
+fn help_displays_vesica_as_the_binary_name() {
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Usage: vesica <COMMAND>"));
+}
+
+#[test]
 fn vault_scan_fails_on_secret_patterns_without_echoing_matched_values() {
     let temp = tempfile::tempdir().unwrap();
     let note = temp.path().join("note.md");
