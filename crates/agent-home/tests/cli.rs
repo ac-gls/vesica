@@ -580,6 +580,58 @@ fn install_manifest_write_failure_rolls_back_managed_actions_and_backups() {
 }
 
 #[test]
+fn install_manifest_persistence_failure_rolls_back_actions_and_new_backups() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    let config = root.join(".config/agent-home");
+    let blocked_temp = config.join("manifest.json.tmp");
+    std::fs::create_dir_all(&blocked_temp).unwrap();
+    let claude = root.join(".claude/CLAUDE.md");
+    let codex = root.join(".codex/AGENTS.md");
+    std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(codex.parent().unwrap()).unwrap();
+    let claude_original = b"user-owned Claude config\n";
+    let codex_original = b"user-owned Codex config\n";
+    std::fs::write(&claude, claude_original).unwrap();
+    std::fs::write(&codex, codex_original).unwrap();
+
+    let output = Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "manifest temporary-path obstruction must fail install"
+    );
+    assert_eq!(std::fs::read(&claude).unwrap(), claude_original);
+    assert_eq!(std::fs::read(&codex).unwrap(), codex_original);
+    assert!(!root.join("Team").exists());
+    assert!(!root.join(".agents/skills/demo-skill").exists());
+    assert!(blocked_temp.is_dir(), "preserve the user-owned obstruction");
+    assert!(!config.join("manifest.json").exists());
+    for directory in [claude.parent().unwrap(), codex.parent().unwrap()] {
+        let backups = std::fs::read_dir(directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("vesica-backup")
+            })
+            .count();
+        assert_eq!(
+            backups, 0,
+            "manifest-save failure must remove created backups"
+        );
+    }
+}
+
+#[test]
 fn install_writes_a_manifest_and_uninstalls_only_untouched_managed_files() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("home");

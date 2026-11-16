@@ -28,15 +28,31 @@ shared-home checkout
 - `ah-herdr`: placeholder only; runtime client is not implemented.
 - `vesica`: currently wires the limited workflows listed above.
 
-## Safety model
+### Safety and transaction
+
+The CLI preflights unsafe state paths. Installer mutations, backup creation, and manifest persistence now share a best-effort rollback transaction. Manifest writes use exclusive temporary-file creation, syncing before atomic replacement, and mode `0600` for new Unix manifests. Backups are created exclusively and only removed on transaction failure if their bytes remain unchanged; cleanup/rollback errors are included in the reported failure. Tests cover manifest temp-file and symlink collisions, user-content preservation, and CLI install rollback.
+
+### Validation
+
+- `cargo fmt --all -- --check`
+- `cargo test --workspace --quiet`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo build -p vesica`
+- `VESICA_TEST_TMP_ROOT=/mnt/wsl-home bash tests/install.sh`
+- `shellcheck install.sh tests/install.sh`
+- `git diff --check`
+
+These are local WSL/Linux results. Windows compilation/replacement behavior and actual Windows/WSL install acceptance remain unverified. The transaction cannot guarantee success if the OS refuses rollback or a user replaces files concurrently; it avoids clobbering changed content and reports remaining errors. Vesica remains a prototype, not pilot/production-ready.
 
 1. The shared-home repository holds team content; the installer repository does not.
 2. Config/catalog parsing rejects credential-like keys.
-3. The installer preflights all planned destinations before creating backups or executing actions. An unmanaged collision or modified manifest-managed target fails closed.
-4. Existing Claude/Codex files are backed up before managed-block changes. Repeat installs reuse recorded backups.
-5. The JSON manifest records install targets, source paths, backups, and hashes. Uninstall restores/removes only entries it can verify; ambiguous or modified content is retained and reported.
-6. Symlinks are created only at absent destinations or accepted if already correct; existing user destinations are never replaced.
-7. Secret scan output contains locations only. Scanner limits individual files to 2 MB and does not traverse symlinks.
+3. The installer preflights all planned destinations and validates the state directory/manifest with symlink-aware metadata before creating backups or executing actions. An unmanaged collision or modified manifest-managed target fails closed.
+4. Existing Claude/Codex files are backed up before managed-block changes. Repeat installs reuse recorded backups; backups use exclusive creation and are removed if a failed plan/manifest write rolls back, unless their content changed in the meantime.
+5. Action execution and manifest persistence share a rollback transaction: if manifest commit fails after actions succeed, the executor attempts reverse-order rollback and reports rollback errors without overwriting intervening edits.
+6. Manifest writes use a unique-create temp file, restrictive Unix permissions, flush/sync, then rename; a preexisting temp file or symlink is not followed or overwritten.
+7. The JSON manifest records install targets, source paths, backups, and hashes. Uninstall restores/removes only entries it can verify; ambiguous or modified content is retained and reported.
+8. Symlinks are created only at absent destinations or accepted if already correct; existing user destinations are never replaced.
+9. Secret scan output contains locations only. Scanner limits individual files to 2 MB and does not traverse symlinks.
 
 ## Known limitations
 

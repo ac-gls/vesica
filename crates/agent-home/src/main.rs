@@ -380,6 +380,7 @@ fn install(o: InstallOptions) -> Result<()> {
             }
         }
     }
+    let mut pending_backups = Vec::new();
     let backups = if o.dry_run {
         std::collections::BTreeMap::new()
     } else {
@@ -397,12 +398,25 @@ fn install(o: InstallOptions) -> Result<()> {
                 match std::fs::read(target) {
                     Ok(bytes) => {
                         let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.fZ");
-                        let backup = target.with_file_name(format!(
-                            "{}.vesica-backup-{stamp}",
-                            target.file_name().unwrap_or_default().to_string_lossy()
-                        ));
-                        std::fs::write(&backup, bytes)?;
-                        result.insert(action.key().to_owned(), backup);
+                        let name = target.file_name().unwrap_or_default().to_string_lossy();
+                        let mut index = 0_u32;
+                        let backup = loop {
+                            let candidate = target
+                                .with_file_name(format!("{name}.vesica-backup-{stamp}-{index}"));
+                            match std::fs::symlink_metadata(&candidate) {
+                                Ok(_) => {
+                                    index = index
+                                        .checked_add(1)
+                                        .context("backup path suffix overflow")?
+                                }
+                                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                                    break candidate
+                                }
+                                Err(error) => return Err(error.into()),
+                            }
+                        };
+                        result.insert(action.key().to_owned(), backup.clone());
+                        pending_backups.push((backup, bytes));
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(error) => return Err(error.into()),
@@ -411,41 +425,120 @@ fn install(o: InstallOptions) -> Result<()> {
         }
         result
     };
-    let outcomes = ah_core::action::Executor.execute(&plan)?;
-    if outcomes.contains(&ah_core::ActionOutcome::Collision) {
-        anyhow::bail!("install stopped on an existing destination; no changes should be treated as fully applied");
-    }
+    let outcomes = ah_core::action::Executor.execute_with_commit(&plan, |outcomes| {
+        if plan.dry_run {
+            return Ok(());
+        }
+        if outcomes.contains(&ah_core::ActionOutcome::Collision) {
+            anyhow::bail!("install stopped on an existing destination; no changes should be treated as fully applied");
+        }
+        let created_backups = create_install_backups(&pending_backups)?;
+        let persist_result = (|| -> Result<()> {
+            let mut m = ah_core::Manifest::load(&cfg.join("manifest.json"))?;
+            let previous = m.clone();
+            m.shared_home = o.options.home_repo.to_string_lossy().into_owned();
+            m.profile = selected.into();
+            for (a, r) in plan.actions.iter().zip(outcomes) {
+                if matches!(
+                    r,
+                    ah_core::ActionOutcome::Created
+                        | ah_core::ActionOutcome::Updated
+                        | ah_core::ActionOutcome::AlreadyCorrect
+                ) {
+                    let mut item = entry(a, backups.get(a.key()))?;
+                    if let Some(old) = previous.entries.get(a.key()) {
+                        item.backup = old.backup.clone();
+                        item.original_sha256 = old.original_sha256.clone();
+                    }
+                    m.record(a, item);
+                }
+            }
+            m.save_atomic(&cfg.join("manifest.json"))?;
+            Ok(())
+        })();
+        let cleanup_errors = if persist_result.is_err() {
+            remove_install_backups(&created_backups, &pending_backups)
+        } else {
+            Vec::new()
+        };
+        match (persist_result, cleanup_errors.is_empty()) {
+            (Err(error), true) => Err(error),
+            (Err(error), false) => anyhow::bail!(
+                "manifest commit failed: {error:#}; backup cleanup also failed: {}",
+                cleanup_errors.join("; ")
+            ),
+            (Ok(()), _) => Ok(()),
+        }
+    })?;
     for (a, r) in plan.actions.iter().zip(&outcomes) {
         println!("{r:?}: {}", a.key())
     }
     if o.dry_run {
         return Ok(());
     }
-    let mut m = ah_core::Manifest::load(&cfg.join("manifest.json"))?;
-    let previous = m.clone();
-    m.shared_home = o.options.home_repo.to_string_lossy().into_owned();
-    m.profile = selected.into();
-    for (a, r) in plan.actions.iter().zip(&outcomes) {
-        if matches!(
-            r,
-            ah_core::ActionOutcome::Created
-                | ah_core::ActionOutcome::Updated
-                | ah_core::ActionOutcome::AlreadyCorrect
-        ) {
-            let mut item = entry(a, backups.get(a.key()))?;
-            if let Some(old) = previous.entries.get(a.key()) {
-                item.backup = old.backup.clone();
-                item.original_sha256 = old.original_sha256.clone();
-            }
-            m.record(a, item);
-        }
-    }
-    m.save_atomic(&cfg.join("manifest.json"))?;
     println!("Manifest recorded: {}", cfg.join("manifest.json").display());
     println!("Repository cloning is not implemented; listed repositories are informational only.");
     println!("Partial wiring: Claude and Codex only; other harnesses are not yet wired.");
     Ok(())
 }
+fn create_install_backups(pending: &[(PathBuf, Vec<u8>)]) -> Result<Vec<PathBuf>> {
+    use std::io::Write;
+
+    let mut created = Vec::new();
+    for (path, contents) in pending {
+        let write_result = (|| -> std::io::Result<()> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)?;
+            created.push(path.clone());
+            file.write_all(contents)
+        })();
+        if let Err(error) = write_result {
+            remove_install_backups(&created, pending);
+            return Err(error).with_context(|| format!("writing backup {}", path.display()));
+        }
+    }
+    Ok(created)
+}
+
+fn remove_install_backups(created: &[PathBuf], pending: &[(PathBuf, Vec<u8>)]) -> Vec<String> {
+    let mut errors = Vec::new();
+    for path in created.iter().rev() {
+        let Some((_, expected)) = pending.iter().find(|(candidate, _)| candidate == path) else {
+            continue;
+        };
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                errors.push(format!(
+                    "{}: cannot inspect backup: {error}",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            errors.push(format!(
+                "{}: backup was replaced; preserved",
+                path.display()
+            ));
+            continue;
+        }
+        match std::fs::read(path) {
+            Ok(actual) if actual == *expected => {
+                if let Err(error) = std::fs::remove_file(path) {
+                    errors.push(format!("{}: cannot remove backup: {error}", path.display()));
+                }
+            }
+            Ok(_) => errors.push(format!("{}: backup changed; preserved", path.display())),
+            Err(error) => errors.push(format!("{}: cannot verify backup: {error}", path.display())),
+        }
+    }
+    errors
+}
+
 fn entry(a: &ah_core::Action, backup_path: Option<&PathBuf>) -> Result<ah_core::ManifestEntry> {
     use sha2::{Digest, Sha256};
     let p = Path::new(a.key());

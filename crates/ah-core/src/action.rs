@@ -105,6 +105,103 @@ mod tests {
     }
 
     #[test]
+    fn commit_failure_rolls_back_created_and_updated_actions() {
+        use std::fs;
+
+        let dir = tempfile::tempdir().unwrap();
+        let created = dir.path().join("created.txt");
+        let existing = dir.path().join("existing.toml");
+        fs::write(&existing, "value = \"original\"\n").unwrap();
+        let plan = Plan {
+            actions: vec![
+                Action::WriteFile {
+                    path: created.to_string_lossy().into_owned(),
+                    content: "new bytes".into(),
+                },
+                Action::MergeToml {
+                    path: existing.to_string_lossy().into_owned(),
+                    patch: serde_json::json!({"managed": true}),
+                },
+            ],
+            dry_run: false,
+        };
+
+        let error = Executor
+            .execute_with_commit(&plan, |_| anyhow::bail!("persist rejected"))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("persist rejected"));
+        assert!(!created.exists());
+        assert_eq!(fs::read(existing).unwrap(), b"value = \"original\"\n");
+    }
+
+    #[test]
+    fn commit_failure_during_dry_run_returns_error_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dry-run.txt");
+        let plan = Plan {
+            actions: vec![Action::WriteFile {
+                path: path.to_string_lossy().into_owned(),
+                content: "not applied".into(),
+            }],
+            dry_run: true,
+        };
+
+        let error = Executor
+            .execute_with_commit(&plan, |_| anyhow::bail!("dry-run report rejected"))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("dry-run report rejected"));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn commit_failure_preserves_intervening_user_edit_and_reports_it() {
+        use std::fs;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("created.txt");
+        let plan = Plan {
+            actions: vec![Action::WriteFile {
+                path: path.to_string_lossy().into_owned(),
+                content: "vesica content".into(),
+            }],
+            dry_run: false,
+        };
+
+        let error = Executor
+            .execute_with_commit(&plan, |_| {
+                fs::write(&path, "user edit during commit")?;
+                anyhow::bail!("persist rejected")
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("persist rejected"));
+        assert!(error.to_string().contains("rollback also failed"));
+        assert_eq!(fs::read(path).unwrap(), b"user edit during commit");
+    }
+
+    #[test]
+    fn successful_commit_keeps_applied_actions() {
+        use std::fs;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("created.txt");
+        let plan = Plan {
+            actions: vec![Action::WriteFile {
+                path: path.to_string_lossy().into_owned(),
+                content: "committed".into(),
+            }],
+            dry_run: false,
+        };
+
+        let outcomes = Executor.execute_with_commit(&plan, |_| Ok(())).unwrap();
+
+        assert_eq!(outcomes, vec![ActionOutcome::Created]);
+        assert_eq!(fs::read(path).unwrap(), b"committed");
+    }
+
+    #[test]
     fn planner_sorts_and_deduplicates_actions_deterministically() {
         let mut planner = Planner::new();
         let first = Action::CreateDir { path: "/b".into() };
@@ -518,6 +615,19 @@ pub struct Executor;
 
 impl Executor {
     pub fn execute(&self, plan: &Plan) -> anyhow::Result<Vec<ActionOutcome>> {
+        self.execute_with_commit(plan, |_| Ok(()))
+    }
+
+    /// Execute a plan and run `commit` only after all actions succeed.
+    /// If either an action or the commit fails, roll back successful actions.
+    pub fn execute_with_commit<F>(
+        &self,
+        plan: &Plan,
+        commit: F,
+    ) -> anyhow::Result<Vec<ActionOutcome>>
+    where
+        F: FnOnce(&[ActionOutcome]) -> anyhow::Result<()>,
+    {
         let mut applied = Vec::new();
         for action in &plan.actions {
             let before = if plan.dry_run {
@@ -584,10 +694,23 @@ impl Executor {
                 }
             }
         }
-        Ok(applied
-            .into_iter()
-            .map(|(_, outcome, _, _)| outcome)
-            .collect())
+        let outcomes = applied
+            .iter()
+            .map(|(_, outcome, _, _)| outcome.clone())
+            .collect::<Vec<_>>();
+        if let Err(error) = commit(&outcomes) {
+            if !plan.dry_run {
+                let rollback_errors = self.rollback(&applied);
+                if !rollback_errors.is_empty() {
+                    anyhow::bail!(
+                        "commit failed: {error:#}; rollback also failed: {}",
+                        rollback_errors.join("; ")
+                    );
+                }
+            }
+            return Err(error);
+        }
+        Ok(outcomes)
     }
 
     fn rollback(&self, applied: &[AppliedAction]) -> Vec<String> {
