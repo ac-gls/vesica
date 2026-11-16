@@ -1,0 +1,18 @@
+[package]
+name = "ah-vault"
+description = "Vault skeleton, check/fix/snapshot/new-note, secret scan, share, team status/pull, note-lint."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+regex.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

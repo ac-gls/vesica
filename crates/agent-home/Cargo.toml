@@ -1,0 +1,34 @@
+[package]
+name = "vesica"
+description = "Install, update and uninstall a team's shared agent setup (Claude Code, OpenCode, Copilot CLI, Codex, Hermes) on Windows + WSL."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[[bin]]
+name = "vesica"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+chrono.workspace = true
+ah-core.workspace = true
+ah-wsl.workspace = true
+ah-config.workspace = true
+ah-agents.workspace = true
+ah-vault.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+tempfile.workspace = true
+serde_json.workspace = true
