@@ -178,6 +178,28 @@ fn uninstall_uses_vesica_root_environment_variable() {
 }
 
 #[test]
+fn doctor_reports_kernel_detection_and_explicit_override() {
+    let without = Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["doctor", "--home-repo"])
+        .arg(fixture_home())
+        .env_remove("VESICA_ALLOW_NON_WSL")
+        .env_remove("AGENT_HOME_ALLOW_NON_WSL")
+        .assert()
+        .success();
+    without.stdout(predicate::str::contains("WSL kernel:"));
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["doctor", "--home-repo"])
+        .arg(fixture_home())
+        .env("VESICA_ALLOW_NON_WSL", "1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("WSL kernel: detected"));
+}
+
+#[test]
 fn doctor_fails_for_a_missing_shared_home() {
     Command::cargo_bin("vesica")
         .unwrap()
