@@ -246,13 +246,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let config = temp.path().join("settings.jsonc");
         let blocked = temp.path().join("blocked");
-        let original = "{}\n";
-        std::fs::write(&config, original).unwrap();
+        std::fs::write(&config, "{}\n").unwrap();
         std::fs::write(&blocked, "not a directory").unwrap();
-        let _guard = ACTION_TEST_HOOK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        AFTER_ACTION_HOOK.store(3, Ordering::SeqCst);
         let plan = Plan {
             actions: vec![
                 Action::MergeJsonc {
@@ -266,6 +261,10 @@ mod tests {
             ],
             dry_run: false,
         };
+        let _guard = ACTION_TEST_HOOK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        AFTER_ACTION_HOOK.store(3, Ordering::SeqCst);
 
         let error = Executor.execute(&plan).unwrap_err().to_string();
         assert!(error.contains("rollback also failed"), "{error}");
