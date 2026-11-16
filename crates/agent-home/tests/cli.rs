@@ -496,7 +496,15 @@ fn install_preserves_and_backs_up_existing_user_configuration() {
     let codex_recorded_backup = codex_manifest["backup"].as_str().unwrap();
     assert!(std::path::Path::new(codex_recorded_backup).exists());
     run();
-    assert_eq!(std::fs::read_dir(codex_backup_dir).unwrap().count(), 2);
+    assert_eq!(
+        std::fs::read_dir(codex_backup_dir).unwrap().count(),
+        2,
+        "repeat install preserves the existing recorded backup rather than creating another"
+    );
+    assert!(
+        std::fs::symlink_metadata(root.join(".config/agent-home/manifest.json.tmp")).is_err(),
+        "a successful reinstall should not leave its atomic-save temp file"
+    );
 }
 
 #[test]
