@@ -33,16 +33,21 @@ impl ProfileArg {
 }
 #[derive(Debug, clap::Args)]
 struct Options {
-    #[arg(long, env = "AGENT_HOME_REPO", env = "VESICA_HOME_REPO")]
+    #[arg(
+        long,
+        env = "AGENT_HOME_REPO",
+        env = "VESICA_HOME_REPO",
+        help = "Local team shared-home checkout"
+    )]
     home_repo: PathBuf,
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, help = "Select a team profile")]
     profile: Option<ProfileArg>,
 }
 #[derive(Debug, clap::Args)]
 struct DoctorOptions {
     #[command(flatten)]
     options: Options,
-    #[arg(long)]
+    #[arg(long, help = "Emit the doctor report as JSON")]
     json: bool,
 }
 #[derive(Debug, clap::Args)]
