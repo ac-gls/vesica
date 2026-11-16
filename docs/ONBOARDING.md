@@ -49,6 +49,6 @@ A match prints only file and line, returns a non-zero exit, and intentionally do
 
 ## Current scope gaps
 
-The CLI does not yet perform a private team-home clone, profile-specific selection/rendering, complete OpenCode/Copilot/Hermes wiring, role-agent generation, Foundry setup/auth probes, Herdr orchestration, Windows interoperability, update, signed release verification, vault policy/lint, or transactional rollback of a partially applied plan. `doctor` explicitly says the live harness, Foundry, Windows, and Herdr checks are not implemented.
+The CLI does not yet perform a private team-home clone, profile-specific install selection/rendering (the `doctor` report now lists matching repositories), complete OpenCode/Copilot/Hermes wiring, role-agent generation, Foundry setup/auth probes, Herdr orchestration, Windows interoperability, update, signed release verification, vault policy/lint, or transactional rollback of a partially applied plan. `doctor` explicitly says the live harness, Foundry, Windows, and Herdr checks are not implemented.
 
 Before a real pilot: resolve the private repo/org permissions and Foundry prerequisite, finish implementation and tests for the missing integrations, run dogfood on Windows+WSL with a disposable profile, verify CI/release artifacts, and obtain explicit release approval.
