@@ -1,0 +1,324 @@
+use assert_cmd::Command;
+use predicates::prelude::*;
+use std::path::PathBuf;
+
+fn fixture_home() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/shared-home")
+}
+
+#[test]
+fn cli_identifies_itself_as_vesica() {
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("vesica "));
+}
+
+#[test]
+fn vault_scan_fails_on_secret_patterns_without_echoing_matched_values() {
+    let temp = tempfile::tempdir().unwrap();
+    let note = temp.path().join("note.md");
+    let marker = format!("ghp_{}", "A".repeat(32));
+    std::fs::write(&note, format!("ordinary note\n{marker}\n")).unwrap();
+    let output = Command::cargo_bin("agent-home")
+        .unwrap()
+        .args(["vault-scan", "--path"])
+        .arg(temp.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let report = String::from_utf8_lossy(&output.stdout).to_string()
+        + &String::from_utf8_lossy(&output.stderr);
+    assert!(report.contains("note.md:2"));
+    assert!(!report.contains(&marker));
+}
+
+#[test]
+fn doctor_validates_the_shared_home_and_reports_selected_profile() {
+    Command::cargo_bin("agent-home")
+        .unwrap()
+        .args(["doctor", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--profile", "developer"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Shared home: valid"))
+        .stdout(predicate::str::contains("Profile: developer"));
+}
+
+#[test]
+fn install_fails_closed_on_a_collision_without_creating_backups_or_other_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("user-home");
+    let team = root.join("Team");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(&team, "user-owned destination").unwrap();
+    let claude = root.join(".claude/CLAUDE.md");
+    std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+    std::fs::write(&claude, "# existing rules\n").unwrap();
+    let original = std::fs::read(&claude).unwrap();
+    let output = Command::cargo_bin("agent-home")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .arg("--root")
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(std::fs::read(&claude).unwrap(), original);
+    assert_eq!(std::fs::read(&team).unwrap(), b"user-owned destination");
+    assert!(!root.join(".codex/AGENTS.md").exists());
+    assert!(!root.join(".config/agent-home/manifest.json").exists());
+    assert_eq!(
+        std::fs::read_dir(claude.parent().unwrap()).unwrap().count(),
+        1,
+        "preflight failure must not leave backup artifacts"
+    );
+}
+
+#[test]
+fn install_links_shared_skills_for_agents_and_uninstall_removes_only_those_links() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    Command::cargo_bin("agent-home")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .arg("--root")
+        .arg(&root)
+        .assert()
+        .success();
+
+    for name in ["demo-skill", "second-skill"] {
+        for base in [root.join(".agents/skills"), root.join(".claude/skills")] {
+            let link = base.join(name);
+            assert!(std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(
+                std::fs::read_link(link).unwrap(),
+                fixture_home()
+                    .canonicalize()
+                    .unwrap()
+                    .join("Agents/Skills")
+                    .join(name)
+            );
+        }
+    }
+    Command::cargo_bin("agent-home")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .assert()
+        .success();
+    assert!(!root.join(".agents/skills/demo-skill").exists());
+    assert!(!root.join(".claude/skills/second-skill").exists());
+}
+
+#[test]
+fn doctor_fails_for_a_missing_shared_home() {
+    Command::cargo_bin("agent-home")
+        .unwrap()
+        .args(["doctor", "--home-repo", "/no/such/shared-home"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("agent-home.toml"));
+}
+
+#[test]
+fn install_dry_run_shows_plan_without_mutating_the_selected_home() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("user-home");
+    std::fs::create_dir_all(&root).unwrap();
+    Command::cargo_bin("agent-home")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--profile", "developer", "--root"])
+        .arg(&root)
+        .arg("--dry-run")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("DRY RUN"))
+        .stdout(predicate::str::contains("AGENTS.md"));
+    assert!(!root.join(".config/agent-home/manifest.json").exists());
+    assert!(!root.join(".claude/CLAUDE.md").exists());
+}
+
+#[test]
+fn install_preserves_and_backs_up_existing_user_configuration() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("user-home");
+    let claude = root.join(".claude/CLAUDE.md");
+    let codex = root.join(".codex/AGENTS.md");
+    std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(codex.parent().unwrap()).unwrap();
+    std::fs::write(&claude, "# My own Claude rules\nkeep this\n").unwrap();
+    std::fs::write(&codex, "my codex rules\n").unwrap();
+
+    let run = || {
+        Command::cargo_bin("agent-home")
+            .unwrap()
+            .args(["install", "--home-repo"])
+            .arg(fixture_home())
+            .args(["--profile", "developer", "--root"])
+            .arg(&root)
+            .assert()
+            .success();
+    };
+    run();
+    let installed = std::fs::read_to_string(&claude).unwrap();
+    assert!(installed.starts_with("# My own Claude rules\nkeep this\n"));
+    assert_eq!(installed.matches("# >>> agent-home >>>").count(), 1);
+    let backup_count = std::fs::read_dir(claude.parent().unwrap())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .contains("agent-home-backup")
+        })
+        .count();
+    run();
+    assert_eq!(std::fs::read_to_string(&claude).unwrap(), installed);
+    let backup_count_after_repeat = std::fs::read_dir(claude.parent().unwrap())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .contains("agent-home-backup")
+        })
+        .count();
+    assert_eq!(
+        backup_count_after_repeat, backup_count,
+        "reinstall should not leave redundant backups"
+    );
+    let codex_backup = std::fs::read_dir(codex.parent().unwrap())
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .contains("agent-home-backup")
+        })
+        .unwrap()
+        .path();
+    assert_eq!(std::fs::read(codex_backup).unwrap(), b"my codex rules\n");
+    let codex_backup_dir = codex.parent().unwrap().to_path_buf();
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.join(".config/agent-home/manifest.json")).unwrap(),
+    )
+    .unwrap();
+    let entry = &manifest["entries"][claude.to_string_lossy().as_ref()];
+    assert!(entry["backup"].as_str().is_some());
+    assert!(std::path::Path::new(entry["backup"].as_str().unwrap()).exists());
+    let codex_manifest = &manifest["entries"][codex.to_string_lossy().as_ref()];
+    let codex_recorded_backup = codex_manifest["backup"].as_str().unwrap();
+    assert!(std::path::Path::new(codex_recorded_backup).exists());
+    run();
+    assert_eq!(std::fs::read_dir(&codex_backup_dir).unwrap().count(), 2);
+}
+
+#[test]
+fn install_writes_a_manifest_and_uninstalls_only_untouched_managed_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    Command::cargo_bin("agent-home")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .success();
+
+    Command::cargo_bin("agent-home")
+        .unwrap()
+        .args(["status", "--root"])
+        .arg(&root)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Recorded entries: 7"));
+
+    Command::cargo_bin("agent-home")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .arg("--dry-run")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("DRY RUN uninstall inspection"));
+
+    Command::cargo_bin("agent-home")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Removed manifest"));
+    assert!(!root.join("Team").exists());
+    assert!(!root.join(".claude/CLAUDE.md").exists());
+}
+
+#[test]
+fn uninstall_restores_backed_up_user_content_if_nothing_changed() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    let claude = root.join(".claude/CLAUDE.md");
+    std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+    std::fs::write(&claude, "my preserved rules\n").unwrap();
+    Command::cargo_bin("agent-home")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .arg("--root")
+        .arg(&root)
+        .assert()
+        .success();
+    Command::cargo_bin("agent-home")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .assert()
+        .success();
+    assert_eq!(
+        std::fs::read_to_string(&claude).unwrap(),
+        "my preserved rules\n"
+    );
+    assert!(!root.join(".config/agent-home/manifest.json").exists());
+}
+
+#[test]
+fn uninstall_skips_a_user_modified_managed_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    Command::cargo_bin("agent-home")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .arg("--root")
+        .arg(&root)
+        .assert()
+        .success();
+    let claude = root.join(".claude/CLAUDE.md");
+    std::fs::write(&claude, "human added a rule\n").unwrap();
+    Command::cargo_bin("agent-home")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .assert()
+        .success();
+    assert_eq!(
+        std::fs::read_to_string(&claude).unwrap(),
+        "human added a rule\n"
+    );
+    assert!(root.join(".config/agent-home/manifest.json").exists());
+}

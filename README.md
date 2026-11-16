@@ -14,11 +14,12 @@ curl -fsSL https://raw.githubusercontent.com/ac-gls/agent-home/v0.1.0/install.sh
 agent-home doctor
 ```
 
-Nothing is overwritten: every change is a symlink, a marked block (`# >>> agent-home >>>`) or a merged
-entry, recorded in `~/.config/agent-home/manifest.json`, and `agent-home uninstall` removes it exactly.
+Nothing is overwritten: supported installer changes are limited to managed imports and symlinks recorded in
+`~/.config/agent-home/manifest.json`. Uninstall verifies recorded content and preserves entries it cannot
+safely verify. This remains a prototype; see the onboarding and architecture notes before trying it.
 
-See [docs/ONBOARDING.md](docs/ONBOARDING.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
-[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+See [docs/ONBOARDING.md](docs/ONBOARDING.md) for the current safe local trial procedure and
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for implemented behavior and scope gaps. Do not use this prototype on a real user profile yet.
 
 ## License
 
