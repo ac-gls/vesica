@@ -81,6 +81,15 @@ fn lint_ignores_email_like_text_without_a_valid_domain_suffix() {
 }
 
 #[test]
+fn lint_ignores_email_addresses_in_non_markdown_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let marker = format!("person-{}@example.invalid", "X".repeat(8));
+    std::fs::write(temp.path().join("data.txt"), format!("{marker}\n")).unwrap();
+    let findings = lint_shared_home(temp.path()).unwrap();
+    assert!(!findings.iter().any(|finding| finding.rule == "VSH007"));
+}
+
+#[test]
 fn lint_flags_known_secret_pattern_without_emitting_value() {
     let temp = tempfile::tempdir().unwrap();
     let marker = format!("ghp_{}", "A".repeat(32));
