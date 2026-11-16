@@ -500,6 +500,86 @@ fn install_preserves_and_backs_up_existing_user_configuration() {
 }
 
 #[test]
+fn doctor_confirms_installed_fixture_from_selected_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .success();
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["doctor", "--json", "--home-repo"])
+        .arg(fixture_home())
+        .env("VESICA_ROOT", &root)
+        .env("VESICA_ALLOW_NON_WSL", "1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"shared_home\": \"valid\""));
+}
+
+#[test]
+fn install_manifest_write_failure_rolls_back_managed_actions_and_backups() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    let config = root.join(".config/agent-home");
+    std::fs::create_dir_all(root.join(".config")).unwrap();
+    symlink("missing-manifest-target", &config).unwrap();
+    let claude = root.join(".claude/CLAUDE.md");
+    let codex = root.join(".codex/AGENTS.md");
+    std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(codex.parent().unwrap()).unwrap();
+    std::fs::write(&claude, "user-owned Claude config\n").unwrap();
+    std::fs::write(&codex, "user-owned Codex config\n").unwrap();
+
+    let output = Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "manifest destination symlink must fail closed"
+    );
+    assert_eq!(
+        ah_config::block::remove(
+            &std::fs::read_to_string(&claude).unwrap(),
+            ah_config::block::CommentStyle::Hash,
+            "vesica",
+        ),
+        "user-owned Claude config\n"
+    );
+    assert_eq!(
+        ah_config::block::remove(
+            &std::fs::read_to_string(&codex).unwrap(),
+            ah_config::block::CommentStyle::Hash,
+            "vesica",
+        ),
+        "user-owned Codex config\n"
+    );
+    assert!(!root.join("Team").exists());
+    assert!(!root.join(".agents/skills/demo-skill").exists());
+    assert!(config.is_symlink(), "never replace the user-owned blocker");
+    for directory in [claude.parent().unwrap(), codex.parent().unwrap()] {
+        assert_eq!(
+            std::fs::read_dir(directory).unwrap().count(),
+            1,
+            "failed install must remove any Vesica backup artifacts"
+        );
+    }
+}
+
+#[test]
 fn install_writes_a_manifest_and_uninstalls_only_untouched_managed_files() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("home");

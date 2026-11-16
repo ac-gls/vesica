@@ -284,9 +284,35 @@ fn install(o: InstallOptions) -> Result<()> {
             selected_repos.join(", ")
         }
     );
-    // Check all destinations before creating backups or executing any action.
+    // Refuse unsafe state paths before creating backups or executing any action.
     if !o.dry_run {
-        let existing = ah_core::Manifest::load(&cfg.join("manifest.json"))?;
+        let metadata = match std::fs::symlink_metadata(&cfg) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.is_some_and(|metadata| metadata.file_type().is_symlink() || !metadata.is_dir())
+        {
+            anyhow::bail!(
+                "Vesica state path must be a real directory: {}",
+                cfg.display()
+            );
+        }
+        let manifest_path = cfg.join("manifest.json");
+        let manifest_metadata = match std::fs::symlink_metadata(&manifest_path) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        if manifest_metadata
+            .is_some_and(|metadata| metadata.file_type().is_symlink() || !metadata.is_file())
+        {
+            anyhow::bail!(
+                "Vesica manifest path must be a regular file: {}",
+                manifest_path.display()
+            );
+        }
+        let existing = ah_core::Manifest::load(&manifest_path)?;
         for action in &plan.actions {
             let target = Path::new(action.key());
             if let Some(record) = existing.entries.get(action.key()) {
