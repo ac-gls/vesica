@@ -265,7 +265,6 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         AFTER_ACTION_HOOK.store(3, Ordering::SeqCst);
-
         let error = Executor.execute(&plan).unwrap_err().to_string();
         assert!(error.contains("rollback also failed"), "{error}");
         assert_eq!(
