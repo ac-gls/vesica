@@ -187,7 +187,9 @@ mod tests {
         let created = temp.path().join("created.txt");
         let blocked = temp.path().join("blocked");
         std::fs::write(&blocked, "not a directory").unwrap();
-        let _guard = ACTION_TEST_HOOK.lock().unwrap();
+        let _guard = ACTION_TEST_HOOK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         AFTER_ACTION_HOOK.store(1, Ordering::SeqCst);
 
         let plan = Plan {
@@ -216,7 +218,9 @@ mod tests {
         let blocked = temp.path().join("blocked");
         std::fs::write(&source, "source").unwrap();
         std::fs::write(&blocked, "not a directory").unwrap();
-        let _guard = ACTION_TEST_HOOK.lock().unwrap();
+        let _guard = ACTION_TEST_HOOK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         AFTER_ACTION_HOOK.store(2, Ordering::SeqCst);
         let plan = Plan {
             actions: vec![
@@ -245,7 +249,9 @@ mod tests {
         let original = "{}\n";
         std::fs::write(&config, original).unwrap();
         std::fs::write(&blocked, "not a directory").unwrap();
-        let _guard = ACTION_TEST_HOOK.lock().unwrap();
+        let _guard = ACTION_TEST_HOOK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         AFTER_ACTION_HOOK.store(3, Ordering::SeqCst);
         let plan = Plan {
             actions: vec![
