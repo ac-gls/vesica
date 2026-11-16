@@ -98,6 +98,9 @@ pub fn lint_shared_home(root: &std::path::Path) -> anyhow::Result<Vec<LintFindin
         let Ok(text) = std::str::from_utf8(&bytes) else {
             continue;
         };
+        if is_policy_markdown(relative) {
+            findings.extend(lint_frontmatter(relative, text));
+        }
         for (i, line) in text.lines().enumerate() {
             let line_no = i + 1;
             let lower = line.to_ascii_lowercase();
@@ -195,6 +198,146 @@ pub fn lint_shared_home(root: &std::path::Path) -> anyhow::Result<Vec<LintFindin
             .then(a.rule.cmp(b.rule))
     });
     Ok(findings)
+}
+
+fn is_policy_markdown(path: &std::path::Path) -> bool {
+    path.components()
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+        .is_some_and(|area| matches!(area, "Knowledge" | "Decisions" | "Templates"))
+}
+
+fn lint_frontmatter(path: &std::path::Path, text: &str) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    let mut lines = text.lines();
+    if lines.next() != Some("---") {
+        let is_area_index = path.file_name().is_some_and(|name| name == "README.md")
+            && path
+                .parent()
+                .is_some_and(|parent| parent.components().count() == 1);
+        if !is_area_index {
+            findings.push(LintFinding {
+                path: path.to_path_buf(),
+                line: 1,
+                rule: "VSH009",
+                message: "required YAML frontmatter is missing",
+            });
+        }
+        return findings;
+    }
+    let mut yaml_lines = Vec::new();
+    let mut closed = false;
+    for line in lines {
+        if line == "---" {
+            closed = true;
+            break;
+        }
+        yaml_lines.push(line);
+    }
+    if !closed {
+        findings.push(LintFinding {
+            path: path.to_path_buf(),
+            line: 1,
+            rule: "VSH008",
+            message: "YAML frontmatter is not closed",
+        });
+        return findings;
+    }
+    let yaml = yaml_lines.join("\n");
+    // Templates may use unquoted date placeholders that are not valid YAML scalars.
+    let parse_yaml = yaml
+        .lines()
+        .map(|line| {
+            if let Some((key, value)) = line.split_once(':') {
+                let value = value.trim();
+                if value.starts_with("{{") && value.ends_with("}}") {
+                    return format!("{key}: \"{value}\"");
+                }
+            }
+            line.to_owned()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let value: serde_yaml::Value = match serde_yaml::from_str(&parse_yaml) {
+        Ok(value) => value,
+        Err(error) => {
+            findings.push(LintFinding {
+                path: path.to_path_buf(),
+                line: error.location().map(|loc| loc.line() + 1).unwrap_or(2),
+                rule: "VSH008",
+                message: "YAML frontmatter is invalid",
+            });
+            return findings;
+        }
+    };
+    let Some(mapping) = value.as_mapping() else {
+        findings.push(LintFinding {
+            path: path.to_path_buf(),
+            line: 2,
+            rule: "VSH008",
+            message: "YAML frontmatter must be a mapping",
+        });
+        return findings;
+    };
+    let field = |name: &str| mapping.get(serde_yaml::Value::String(name.to_owned()));
+    let is_template = path
+        .components()
+        .next()
+        .is_some_and(|c| c.as_os_str() == "Templates");
+    for name in [
+        "title",
+        "created",
+        "updated",
+        "type",
+        "area",
+        "tags",
+        "owner",
+        "authority",
+    ]
+    .into_iter()
+    .filter(|name| !is_template || !matches!(*name, "owner" | "authority"))
+    {
+        let value = field(name);
+        let valid_shape = match name {
+            "title" | "created" | "updated" | "type" | "area" | "owner" | "authority" => {
+                value.is_some_and(|v| v.as_str().is_some_and(|s| !s.trim().is_empty()))
+            }
+            "tags" => value.is_some_and(serde_yaml::Value::is_sequence),
+            _ => true,
+        };
+        if !valid_shape {
+            findings.push(LintFinding {
+                path: path.to_path_buf(),
+                line: 1,
+                rule: "VSH009",
+                message: "required frontmatter field is missing or invalid",
+            });
+            break;
+        }
+    }
+    if is_template {
+        return findings;
+    }
+    if let Some(authority) = field("authority").and_then(serde_yaml::Value::as_str) {
+        if !matches!(authority, "working" | "mirror" | "digest") {
+            findings.push(LintFinding {
+                path: path.to_path_buf(),
+                line: 1,
+                rule: "VSH010",
+                message: "frontmatter authority must be working, mirror, or digest",
+            });
+        } else if matches!(authority, "mirror" | "digest")
+            && field("source").is_none_or(serde_yaml::Value::is_null)
+        {
+            findings.push(LintFinding {
+                path: path.to_path_buf(),
+                line: 1,
+                rule: "VSH011",
+                message: "mirror and digest notes require a source field",
+            });
+        }
+    }
+    findings
 }
 
 fn valid_email_match(line: &str, start: usize, end: usize) -> bool {

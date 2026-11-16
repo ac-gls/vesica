@@ -11,6 +11,7 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+serde_yaml = "0.9"
 regex.workspace = true
 walkdir.workspace = true
 

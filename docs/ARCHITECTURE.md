@@ -23,7 +23,7 @@ shared-home checkout
 - `ah-config`: JSONC/TOML recursive merges, managed text blocks, safe symlink primitive.
 - `ah-core`: team/catalog parsing and validation, action planner/executor, manifest model.
 - `ah-agents`: deterministic discovery of skill directories containing `SKILL.md`.
-- `ah-vault`: bounded common-credential pattern scanner and read-only shared-home lint (area README coverage, size cap, local wikilinks, personal paths, heuristic email detection, secret-safe findings).
+- `ah-vault`: bounded common-credential pattern scanner and read-only shared-home lint (area README coverage, size cap, local wikilinks, personal paths, heuristic email detection, policy-area frontmatter/ownership/source checks, secret-safe findings).
 - `ah-wsl`: WSL kernel detection and a CI override; no Windows interop installer steps yet.
 - `ah-herdr`: placeholder only; runtime client is not implemented.
 - `vesica`: currently wires the limited workflows listed above.

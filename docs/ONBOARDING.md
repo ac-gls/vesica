@@ -13,7 +13,7 @@
 - `install` links the local shared home at `~/Team` (or an explicit test root), adds managed imports to Claude Code and Codex instruction files, and links discovered skill directories to `.agents/skills` and `.claude/skills`.
 - `status` inspects the installer manifest.
 - `uninstall` removes or restores only entries that pass verification; modified or unverifiable entries are retained.
-- `lint --home-repo <path>` checks a local shared-home checkout (area README coverage, size cap, unresolved internal wiki links, personal paths and common secrets). Findings contain relative paths, line, stable rule ID and fixed message only—not matched text. This is heuristic and not a complete DLP or policy validator.
+- `lint --home-repo <path>` checks area README coverage, 1 MB file limit, internal wiki links, personal paths, heuristic email patterns (`VSH007`), credential patterns (`VSH006`), and policy-area frontmatter: valid YAML (`VSH008`), required fields including owner/tags (`VSH009`), allowed authority (`VSH010`), and required source for mirror/digest notes (`VSH011`). These rules apply within `Knowledge/`, `Decisions/`, and `Templates/`; area-root README files without frontmatter are tolerated for compatibility, and template-variable fields must conform to valid YAML (not skipped wholesale). Findings are secret-safe; heuristics do not constitute complete DLP/policy enforcement.
 - `vault-scan --path <directory>` flags common credential patterns by path and line without printing matched values.
 
 ## Build and test locally
