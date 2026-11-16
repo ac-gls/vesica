@@ -28,6 +28,8 @@ cargo build -p vesica
 cargo run -p vesica -- --help
 ```
 
+The shell bootstrap also has network-free integration coverage: `bash tests/install.sh` creates a temporary fixture release and tests checksum validation and argument forwarding. Its checksum-failure case generates a dummy digest at runtime; no real secrets are used.
+
 ## Safe local trial
 
 Use a disposable directory, not the real home, first:

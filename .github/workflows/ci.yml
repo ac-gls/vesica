@@ -29,3 +29,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: shellcheck install.sh
+      - name: Installer integration tests
+        run: bash tests/install.sh

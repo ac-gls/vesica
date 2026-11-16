@@ -29,6 +29,8 @@ safely verify. This remains a prototype; see the onboarding and architecture not
 See [docs/ONBOARDING.md](docs/ONBOARDING.md) for the current safe local trial procedure and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for implemented behavior and scope gaps. Do not use this prototype on a real user profile yet.
 
+The bootstrap can be exercised locally with `bash tests/install.sh`. It builds a fixture release tarball and checks bootstrap-only installation, safe argument forwarding, and checksum rejection without leaving an installed binary behind. CI runs this suite alongside ShellCheck; it does not download or publish a real release.
+
 ## License
 
 MIT
