@@ -40,7 +40,8 @@ shared-home checkout
 
 ## Known limitations
 
-- Installation currently targets a local shared-home checkout. Private-team cloning/bootstrap and rollback across a partially failed multi-action install are not implemented.
+- `bash tests/install.sh` builds a disposable fixture release and checks bootstrap-only installation, preservation of spaced CLI arguments, and checksum rejection without side effects. It is network-free; CI runs it alongside shellcheck. It does not establish the plan's complete install → doctor → idempotent reinstall parity acceptance.
+- Private-team cloning/bootstrap and rollback across a partially failed multi-action install are not implemented.
 - Profile selection is recorded in the manifest; both `doctor` and `install` report the repositories assigned to the selected profile. Install does not clone or install those repositories yet, and currently links the shared skill set for all profiles. Repository entries in the install output are informational only.
 - Claude/Codex and discovered skill links are the only harness wiring. OpenCode, Copilot, Hermes, role-agent rendering, Foundry, and Herdr are not wired.
 - WSL detection exists, but Windows profile discovery, drvfs/OneDrive validation, `winget`, Obsidian, scheduled tasks, and Windows-side operations do not.
