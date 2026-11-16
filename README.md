@@ -15,7 +15,7 @@ vesica doctor
 ```
 
 Nothing is overwritten: supported installer changes are limited to managed imports and symlinks recorded in
-`~/.config/vesica/manifest.json`. Uninstall verifies recorded content and preserves entries it cannot
+`~/.config/agent-home/manifest.json`. Uninstall verifies recorded content and preserves entries it cannot
 safely verify. This remains a prototype; see the onboarding and architecture notes before trying it.
 
 See [docs/ONBOARDING.md](docs/ONBOARDING.md) for the current safe local trial procedure and

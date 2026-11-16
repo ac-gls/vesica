@@ -1,9 +1,7 @@
 # Agent Home Kit Architecture
 
 > **Status: prototype / incomplete.** This document describes the code that exists in this checkout, not the aspirational multi-agent installer described in older planning notes. Do not use it to install a production team setup yet.
-
 ## Current executable flow
-
 ```text
 vesica CLI
   ├─ doctor   parse team config + optional Foundry catalog; report selected profile

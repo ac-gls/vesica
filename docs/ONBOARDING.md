@@ -2,6 +2,10 @@
 
 > **Prototype notice:** This checkout has working local install/status/uninstall slices, not the complete team setup. Do not follow the aspirational bootstrap example in the top-level README as a production-ready procedure yet. Foundry access and private shared-home repository access are external prerequisites and remain unresolved.
 
+## Vesica rename and compatibility
+
+The installed program and CLI are named `vesica`; the public repository/download URL remains `ac-gls/agent-home`. The shared-home config stays `agent-home.toml`. To avoid orphaning existing install records, the manifest continues at `~/.config/agent-home/manifest.json`, and existing `AGENT_HOME_REPO`, `AGENT_HOME_ROOT`, and `AGENT_HOME_ALLOW_NON_WSL` variables remain accepted. The bootstrap accepts `VESICA_*` variables first, with legacy variable fallback. Uninstall handles both historical `agent-home` blocks and new `vesica` blocks. This identity change does not migrate an existing installation directory.
+
 ## What currently works
 
 - `doctor` parses and validates a local shared-home `agent-home.toml` and optional `foundry.catalog.json`.
