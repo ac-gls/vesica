@@ -33,7 +33,7 @@ impl ProfileArg {
 }
 #[derive(Debug, clap::Args)]
 struct Options {
-    #[arg(long, env = "AGENT_HOME_REPO")]
+    #[arg(long, env = "AGENT_HOME_REPO", env = "VESICA_HOME_REPO")]
     home_repo: PathBuf,
     #[arg(long, value_enum)]
     profile: Option<ProfileArg>,

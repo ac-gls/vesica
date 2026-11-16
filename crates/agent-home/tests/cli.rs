@@ -60,6 +60,18 @@ fn doctor_validates_the_shared_home_and_reports_selected_profile() {
 }
 
 #[test]
+fn doctor_prefers_vesica_environment_variables_over_legacy_names() {
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["doctor"])
+        .env("VESICA_HOME_REPO", fixture_home())
+        .env("AGENT_HOME_REPO", "/vesica-should-win-over-legacy")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Shared home: valid"));
+}
+
+#[test]
 fn install_fails_closed_on_a_collision_without_creating_backups_or_other_changes() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("user-home");
