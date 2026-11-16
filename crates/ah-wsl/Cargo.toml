@@ -11,7 +11,3 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
-ah-core.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
