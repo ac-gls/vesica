@@ -22,7 +22,7 @@ fn vault_scan_fails_on_secret_patterns_without_echoing_matched_values() {
     let note = temp.path().join("note.md");
     let marker = format!("ghp_{}", "A".repeat(32));
     std::fs::write(&note, format!("ordinary note\n{marker}\n")).unwrap();
-    let output = Command::cargo_bin("agent-home")
+    let output = Command::cargo_bin("vesica")
         .unwrap()
         .args(["vault-scan", "--path"])
         .arg(temp.path())
@@ -37,7 +37,7 @@ fn vault_scan_fails_on_secret_patterns_without_echoing_matched_values() {
 
 #[test]
 fn doctor_validates_the_shared_home_and_reports_selected_profile() {
-    Command::cargo_bin("agent-home")
+    Command::cargo_bin("vesica")
         .unwrap()
         .args(["doctor", "--home-repo"])
         .arg(fixture_home())
@@ -59,7 +59,7 @@ fn install_fails_closed_on_a_collision_without_creating_backups_or_other_changes
     std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
     std::fs::write(&claude, "# existing rules\n").unwrap();
     let original = std::fs::read(&claude).unwrap();
-    let output = Command::cargo_bin("agent-home")
+    let output = Command::cargo_bin("vesica")
         .unwrap()
         .args(["install", "--home-repo"])
         .arg(fixture_home())
@@ -83,7 +83,7 @@ fn install_fails_closed_on_a_collision_without_creating_backups_or_other_changes
 fn install_links_shared_skills_for_agents_and_uninstall_removes_only_those_links() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("home");
-    Command::cargo_bin("agent-home")
+    Command::cargo_bin("vesica")
         .unwrap()
         .args(["install", "--home-repo"])
         .arg(fixture_home())
@@ -109,7 +109,7 @@ fn install_links_shared_skills_for_agents_and_uninstall_removes_only_those_links
             );
         }
     }
-    Command::cargo_bin("agent-home")
+    Command::cargo_bin("vesica")
         .unwrap()
         .args(["uninstall", "--root"])
         .arg(&root)
@@ -121,7 +121,7 @@ fn install_links_shared_skills_for_agents_and_uninstall_removes_only_those_links
 
 #[test]
 fn doctor_fails_for_a_missing_shared_home() {
-    Command::cargo_bin("agent-home")
+    Command::cargo_bin("vesica")
         .unwrap()
         .args(["doctor", "--home-repo", "/no/such/shared-home"])
         .assert()
@@ -134,7 +134,7 @@ fn install_dry_run_shows_plan_without_mutating_the_selected_home() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("user-home");
     std::fs::create_dir_all(&root).unwrap();
-    Command::cargo_bin("agent-home")
+    Command::cargo_bin("vesica")
         .unwrap()
         .args(["install", "--home-repo"])
         .arg(fixture_home())
@@ -161,7 +161,7 @@ fn install_preserves_and_backs_up_existing_user_configuration() {
     std::fs::write(&codex, "my codex rules\n").unwrap();
 
     let run = || {
-        Command::cargo_bin("agent-home")
+        Command::cargo_bin("vesica")
             .unwrap()
             .args(["install", "--home-repo"])
             .arg(fixture_home())
@@ -173,7 +173,7 @@ fn install_preserves_and_backs_up_existing_user_configuration() {
     run();
     let installed = std::fs::read_to_string(&claude).unwrap();
     assert!(installed.starts_with("# My own Claude rules\nkeep this\n"));
-    assert_eq!(installed.matches("# >>> agent-home >>>").count(), 1);
+    assert_eq!(installed.matches("# >>> vesica >>>").count(), 1);
     let backup_count = std::fs::read_dir(claude.parent().unwrap())
         .unwrap()
         .filter_map(Result::ok)
@@ -181,7 +181,7 @@ fn install_preserves_and_backs_up_existing_user_configuration() {
             entry
                 .file_name()
                 .to_string_lossy()
-                .contains("agent-home-backup")
+                .contains("vesica-backup")
         })
         .count();
     run();
@@ -193,7 +193,7 @@ fn install_preserves_and_backs_up_existing_user_configuration() {
             entry
                 .file_name()
                 .to_string_lossy()
-                .contains("agent-home-backup")
+                .contains("vesica-backup")
         })
         .count();
     assert_eq!(
@@ -207,7 +207,7 @@ fn install_preserves_and_backs_up_existing_user_configuration() {
             entry
                 .file_name()
                 .to_string_lossy()
-                .contains("agent-home-backup")
+                .contains("vesica-backup")
         })
         .unwrap()
         .path();
@@ -224,14 +224,14 @@ fn install_preserves_and_backs_up_existing_user_configuration() {
     let codex_recorded_backup = codex_manifest["backup"].as_str().unwrap();
     assert!(std::path::Path::new(codex_recorded_backup).exists());
     run();
-    assert_eq!(std::fs::read_dir(&codex_backup_dir).unwrap().count(), 2);
+    assert_eq!(std::fs::read_dir(codex_backup_dir).unwrap().count(), 2);
 }
 
 #[test]
 fn install_writes_a_manifest_and_uninstalls_only_untouched_managed_files() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("home");
-    Command::cargo_bin("agent-home")
+    Command::cargo_bin("vesica")
         .unwrap()
         .args(["install", "--home-repo"])
         .arg(fixture_home())
@@ -240,7 +240,7 @@ fn install_writes_a_manifest_and_uninstalls_only_untouched_managed_files() {
         .assert()
         .success();
 
-    Command::cargo_bin("agent-home")
+    Command::cargo_bin("vesica")
         .unwrap()
         .args(["status", "--root"])
         .arg(&root)
@@ -248,7 +248,7 @@ fn install_writes_a_manifest_and_uninstalls_only_untouched_managed_files() {
         .success()
         .stdout(predicate::str::contains("Recorded entries: 7"));
 
-    Command::cargo_bin("agent-home")
+    Command::cargo_bin("vesica")
         .unwrap()
         .args(["uninstall", "--root"])
         .arg(&root)
@@ -257,7 +257,7 @@ fn install_writes_a_manifest_and_uninstalls_only_untouched_managed_files() {
         .success()
         .stdout(predicate::str::contains("DRY RUN uninstall inspection"));
 
-    Command::cargo_bin("agent-home")
+    Command::cargo_bin("vesica")
         .unwrap()
         .args(["uninstall", "--root"])
         .arg(&root)
@@ -275,7 +275,7 @@ fn uninstall_restores_backed_up_user_content_if_nothing_changed() {
     let claude = root.join(".claude/CLAUDE.md");
     std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
     std::fs::write(&claude, "my preserved rules\n").unwrap();
-    Command::cargo_bin("agent-home")
+    Command::cargo_bin("vesica")
         .unwrap()
         .args(["install", "--home-repo"])
         .arg(fixture_home())
@@ -283,7 +283,7 @@ fn uninstall_restores_backed_up_user_content_if_nothing_changed() {
         .arg(&root)
         .assert()
         .success();
-    Command::cargo_bin("agent-home")
+    Command::cargo_bin("vesica")
         .unwrap()
         .args(["uninstall", "--root"])
         .arg(&root)
@@ -300,7 +300,7 @@ fn uninstall_restores_backed_up_user_content_if_nothing_changed() {
 fn uninstall_skips_a_user_modified_managed_file() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("home");
-    Command::cargo_bin("agent-home")
+    Command::cargo_bin("vesica")
         .unwrap()
         .args(["install", "--home-repo"])
         .arg(fixture_home())
@@ -310,7 +310,7 @@ fn uninstall_skips_a_user_modified_managed_file() {
         .success();
     let claude = root.join(".claude/CLAUDE.md");
     std::fs::write(&claude, "human added a rule\n").unwrap();
-    Command::cargo_bin("agent-home")
+    Command::cargo_bin("vesica")
         .unwrap()
         .args(["uninstall", "--root"])
         .arg(&root)

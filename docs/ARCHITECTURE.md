@@ -5,7 +5,7 @@
 ## Current executable flow
 
 ```text
-agent-home CLI
+vesica CLI
   ├─ doctor   parse team config + optional Foundry catalog; report selected profile
   ├─ install  build a plan; preflight destinations/manifest; back up existing
   │           Claude/Codex instruction files; execute supported actions; save manifest
@@ -27,7 +27,7 @@ shared-home checkout
 - `ah-vault`: bounded common-credential pattern scanner. It reports file and line, never matched text.
 - `ah-wsl`: WSL kernel detection and a CI override; no Windows interop installer steps yet.
 - `ah-herdr`: placeholder only; runtime client is not implemented.
-- `agent-home`: currently wires the limited workflows listed above.
+- `vesica`: currently wires the limited workflows listed above.
 
 ## Safety model
 
@@ -56,7 +56,7 @@ From the repository root:
 cargo fmt --all -- --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-cargo build -p agent-home
+cargo build -p vesica
 ```
 
 CI additionally runs ShellCheck over `install.sh`. Current integration tests use temporary homes and the fixture at `tests/fixtures/shared-home`; they do not establish readiness on a real user's WSL/Windows profile.

@@ -1,5 +1,5 @@
 [package]
-name = "agent-home"
+name = "vesica"
 description = "Install, update and uninstall a team's shared agent setup (Claude Code, OpenCode, Copilot CLI, Codex, Hermes) on Windows + WSL."
 version.workspace = true
 edition.workspace = true
@@ -10,7 +10,7 @@ authors.workspace = true
 publish = false
 
 [[bin]]
-name = "agent-home"
+name = "vesica"
 path = "src/main.rs"
 
 [dependencies]

@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Parser)]
-#[command(name = "agent-home", version, about = "Team agent home kit installer")]
+#[command(name = "vesica", version, about = "Vesica team agent installer")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -172,13 +172,13 @@ fn install(o: InstallOptions) -> Result<()> {
                 .to_string_lossy()
                 .into_owned(),
             style: "hash".into(),
-            name: "agent-home".into(),
+            name: "vesica".into(),
             body: import.clone(),
         },
         ah_core::Action::UpsertBlock {
             path: home.join(".codex/AGENTS.md").to_string_lossy().into_owned(),
             style: "hash".into(),
-            name: "agent-home".into(),
+            name: "vesica".into(),
             body: import,
         },
     ];
@@ -262,7 +262,7 @@ fn install(o: InstallOptions) -> Result<()> {
                             || contents.contains("agent-home:end")
                         {
                             anyhow::bail!(
-                                "unmanaged target contains reserved agent-home markers: {}",
+                                "unmanaged target contains reserved Vesica markers: {}",
                                 target.display()
                             );
                         }
@@ -294,7 +294,7 @@ fn install(o: InstallOptions) -> Result<()> {
                     Ok(bytes) => {
                         let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.fZ");
                         let backup = target.with_file_name(format!(
-                            "{}.agent-home-backup-{stamp}",
+                            "{}.vesica-backup-{stamp}",
                             target.file_name().unwrap_or_default().to_string_lossy()
                         ));
                         std::fs::write(&backup, bytes)?;
@@ -464,7 +464,7 @@ fn uninstall(r: Option<&Path>, dry: bool) -> Result<()> {
                     let cleaned = ah_config::block::remove(
                         &current,
                         ah_config::block::CommentStyle::Hash,
-                        "agent-home",
+                        "vesica",
                     );
                     if !cleaned.is_empty() {
                         println!(
@@ -513,8 +513,17 @@ fn uninstall(r: Option<&Path>, dry: bool) -> Result<()> {
                 let cleaned = ah_config::block::remove(
                     &current,
                     ah_config::block::CommentStyle::Hash,
-                    "agent-home",
+                    "vesica",
                 );
+                let cleaned = if cleaned == original {
+                    cleaned
+                } else {
+                    ah_config::block::remove(
+                        &current,
+                        ah_config::block::CommentStyle::Hash,
+                        "agent-home",
+                    )
+                };
                 if cleaned != original {
                     println!("Skipped block because stripping the managed region would not restore backup: {key}");
                     retained.insert(key, entry);

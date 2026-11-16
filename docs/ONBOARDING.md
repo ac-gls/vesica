@@ -19,8 +19,8 @@ Prerequisites: Rust toolchain from `rust-toolchain.toml`, Git, and a local share
 cargo fmt --all -- --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-cargo build -p agent-home
-cargo run -p agent-home -- --help
+cargo build -p vesica
+cargo run -p vesica -- --help
 ```
 
 ## Safe local trial
@@ -28,16 +28,16 @@ cargo run -p agent-home -- --help
 Use a disposable directory, not the real home, first:
 
 ```sh
-cargo run -p agent-home -- doctor --home-repo tests/fixtures/shared-home
-cargo run -p agent-home -- install --home-repo tests/fixtures/shared-home --root /tmp/agent-home-test --dry-run
+cargo run -p vesica -- doctor --home-repo tests/fixtures/shared-home
+cargo run -p vesica -- install --home-repo tests/fixtures/shared-home --root /tmp/vesica-test --dry-run
 ```
 
-Only after inspecting the plan, use the same temporary root without `--dry-run`, then inspect it using `status --root /tmp/agent-home-test`. Exercise conservative removal with `uninstall --root /tmp/agent-home-test`. Never point this prototype at a real profile until it has been dogfooded and its backup/rollback behavior reviewed.
+Only after inspecting the plan, use the same temporary root without `--dry-run`, then inspect it using `status --root /tmp/vesica-test`. Exercise conservative removal with `uninstall --root /tmp/vesica-test`. Never point this prototype at a real profile until it has been dogfooded and its backup/rollback behavior reviewed.
 
 For scanner development, run against a disposable fixture—not a synced vault with real credentials:
 
 ```sh
-cargo run -p agent-home -- vault-scan --path tests/fixtures/shared-home
+cargo run -p vesica -- vault-scan --path tests/fixtures/shared-home
 ```
 
 A match prints only file and line, returns a non-zero exit, and intentionally does not echo the detected value. The scanner is heuristic; a clean scan is not proof that no secrets exist.
