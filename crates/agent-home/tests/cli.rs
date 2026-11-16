@@ -1,5 +1,6 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
+use sha2::Digest;
 use std::path::PathBuf;
 
 fn fixture_home() -> PathBuf {
@@ -276,6 +277,57 @@ fn install_writes_a_manifest_and_uninstalls_only_untouched_managed_files() {
         .stdout(predicate::str::contains("Removed manifest"));
     assert!(!root.join("Team").exists());
     assert!(!root.join(".claude/CLAUDE.md").exists());
+}
+
+#[test]
+fn uninstall_restores_legacy_agent_home_managed_blocks() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    let target = root.join(".claude/CLAUDE.md");
+    let original = "legacy user rules\n";
+    let installed = format!(
+        "{original}\n# >>> agent-home >>>\n@/legacy/shared/AGENTS.md\n# <<< agent-home <<<\n"
+    );
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, &installed).unwrap();
+    let backup = target.with_file_name("CLAUDE.md.agent-home-backup-legacy");
+    std::fs::write(&backup, original).unwrap();
+
+    let mut manifest = serde_json::json!({
+        "schema": 1,
+        "app_version": "0.1.0",
+        "shared_home": "/legacy/shared",
+        "profile": "developer",
+        "entries": {}
+    });
+    let hash = hex::encode(sha2::Sha256::digest(installed.as_bytes()));
+    let original_hash = hex::encode(sha2::Sha256::digest(original.as_bytes()));
+    manifest["entries"][target.to_string_lossy().as_ref()] = serde_json::json!({
+        "kind": "managed-block",
+        "target": target.to_string_lossy(),
+        "source": null,
+        "backup": backup.to_string_lossy(),
+        "original_sha256": original_hash,
+        "installed_sha256": hash
+    });
+    let config = root.join(".config/agent-home");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("manifest.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Restoring original file"));
+
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), original);
+    assert!(!config.join("manifest.json").exists());
 }
 
 #[test]
