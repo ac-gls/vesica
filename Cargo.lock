@@ -916,6 +916,7 @@ dependencies = [
  "ah-config",
  "ah-core",
  "ah-vault",
+ "ah-wsl",
  "anyhow",
  "assert_cmd",
  "chrono",

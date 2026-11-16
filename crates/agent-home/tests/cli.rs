@@ -131,6 +131,18 @@ fn install_links_shared_skills_for_agents_and_uninstall_removes_only_those_links
 }
 
 #[test]
+fn doctor_reports_wsl_kernel_detection_with_vesica_override() {
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["doctor", "--home-repo"])
+        .arg(fixture_home())
+        .env("VESICA_ALLOW_NON_WSL", "1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("WSL kernel: detected"));
+}
+
+#[test]
 fn doctor_fails_for_a_missing_shared_home() {
     Command::cargo_bin("vesica")
         .unwrap()

@@ -22,6 +22,7 @@ sha2.workspace = true
 hex.workspace = true
 chrono.workspace = true
 ah-core.workspace = true
+ah-wsl.workspace = true
 ah-config.workspace = true
 ah-agents.workspace = true
 ah-vault.workspace = true

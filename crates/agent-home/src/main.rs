@@ -138,6 +138,11 @@ Foundry deployments: {}",
         c.repos.len(),
         f.deployments.len()
     );
+    let wsl = ah_wsl::is_wsl()?;
+    println!(
+        "WSL kernel: {}",
+        if wsl { "detected" } else { "not detected" }
+    );
     println!("Live harness, Foundry, Windows and Herdr checks are not implemented.");
     Ok(())
 }
