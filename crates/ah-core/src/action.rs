@@ -98,11 +98,11 @@ impl Planner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Mutex;
+    use std::cell::Cell;
 
-    static ACTION_TEST_HOOK: Mutex<()> = Mutex::new(());
-    pub(super) static AFTER_ACTION_HOOK: AtomicUsize = AtomicUsize::new(0);
+    thread_local! {
+        pub(super) static AFTER_ACTION_HOOK: Cell<usize> = const { Cell::new(0) };
+    }
 
     #[test]
     fn planner_sorts_and_deduplicates_actions_deterministically() {
@@ -187,10 +187,7 @@ mod tests {
         let created = temp.path().join("created.txt");
         let blocked = temp.path().join("blocked");
         std::fs::write(&blocked, "not a directory").unwrap();
-        let _guard = ACTION_TEST_HOOK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        AFTER_ACTION_HOOK.store(1, Ordering::SeqCst);
+        AFTER_ACTION_HOOK.set(1);
 
         let plan = Plan {
             actions: vec![
@@ -218,10 +215,7 @@ mod tests {
         let blocked = temp.path().join("blocked");
         std::fs::write(&source, "source").unwrap();
         std::fs::write(&blocked, "not a directory").unwrap();
-        let _guard = ACTION_TEST_HOOK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        AFTER_ACTION_HOOK.store(2, Ordering::SeqCst);
+        AFTER_ACTION_HOOK.set(2);
         let plan = Plan {
             actions: vec![
                 Action::Symlink {
@@ -261,10 +255,7 @@ mod tests {
             ],
             dry_run: false,
         };
-        let _guard = ACTION_TEST_HOOK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        AFTER_ACTION_HOOK.store(3, Ordering::SeqCst);
+        AFTER_ACTION_HOOK.set(3);
         let error = Executor.execute(&plan).unwrap_err().to_string();
         assert!(error.contains("rollback also failed"), "{error}");
         assert_eq!(
@@ -558,8 +549,7 @@ impl Executor {
                     applied.push((action.clone(), outcome, before, applied_bytes));
                     #[cfg(test)]
                     if !plan.dry_run {
-                        match tests::AFTER_ACTION_HOOK.swap(0, std::sync::atomic::Ordering::SeqCst)
-                        {
+                        match tests::AFTER_ACTION_HOOK.with(|hook| hook.replace(0)) {
                             1 => {
                                 if let Action::WriteFile { path, .. } = action {
                                     std::fs::write(path, "user changed it").unwrap();
