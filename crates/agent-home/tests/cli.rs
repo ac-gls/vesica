@@ -496,7 +496,116 @@ fn install_preserves_and_backs_up_existing_user_configuration() {
     let codex_recorded_backup = codex_manifest["backup"].as_str().unwrap();
     assert!(std::path::Path::new(codex_recorded_backup).exists());
     run();
-    assert_eq!(std::fs::read_dir(codex_backup_dir).unwrap().count(), 2);
+    assert_eq!(
+        std::fs::read_dir(codex_backup_dir).unwrap().count(),
+        2,
+        "repeat install preserves the existing recorded backup rather than creating another"
+    );
+    assert!(
+        std::fs::symlink_metadata(root.join(".config/agent-home/manifest.json.tmp")).is_err(),
+        "a successful reinstall should not leave its atomic-save temp file"
+    );
+}
+
+#[test]
+fn reinstall_refuses_to_use_a_modified_recorded_backup() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("user-home");
+    let claude = root.join(".claude/CLAUDE.md");
+    std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+    std::fs::write(&claude, "user-authored Claude rules\n").unwrap();
+
+    let run = || {
+        Command::cargo_bin("vesica")
+            .unwrap()
+            .args(["install", "--home-repo"])
+            .arg(fixture_home())
+            .args(["--profile", "developer", "--root"])
+            .arg(&root)
+            .output()
+            .unwrap()
+    };
+    assert!(run().status.success(), "initial install should succeed");
+    let installed = std::fs::read(&claude).unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.join(".config/agent-home/manifest.json")).unwrap(),
+    )
+    .unwrap();
+    let backup = std::path::PathBuf::from(
+        manifest["entries"][claude.to_string_lossy().as_ref()]["backup"]
+            .as_str()
+            .unwrap(),
+    );
+    std::fs::write(&backup, "user changed recorded backup\n").unwrap();
+
+    let second = run();
+    assert!(!second.status.success(), "modified backup must fail closed");
+    let diagnostic = String::from_utf8_lossy(&second.stdout).to_string()
+        + &String::from_utf8_lossy(&second.stderr);
+    assert!(
+        diagnostic.contains("recorded backup was modified"),
+        "{diagnostic}"
+    );
+
+    assert_eq!(std::fs::read(&claude).unwrap(), installed);
+    assert_eq!(
+        std::fs::read(&backup).unwrap(),
+        b"user changed recorded backup\n"
+    );
+}
+
+#[test]
+fn reinstall_refuses_to_follow_a_symlink_at_recorded_backup() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("user-home");
+        let claude = root.join(".claude/CLAUDE.md");
+        std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+        std::fs::write(&claude, "user-authored Claude rules\n").unwrap();
+        let run = || {
+            Command::cargo_bin("vesica")
+                .unwrap()
+                .args(["install", "--home-repo"])
+                .arg(fixture_home())
+                .args(["--profile", "developer", "--root"])
+                .arg(&root)
+                .output()
+                .unwrap()
+        };
+        assert!(run().status.success());
+        let installed = std::fs::read(&claude).unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join(".config/agent-home/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        let backup = std::path::PathBuf::from(
+            manifest["entries"][claude.to_string_lossy().as_ref()]["backup"]
+                .as_str()
+                .unwrap(),
+        );
+        let outside = temp.path().join("outside-user-file");
+        std::fs::write(&outside, "outside file must never be followed").unwrap();
+        std::fs::remove_file(&backup).unwrap();
+        symlink(&outside, &backup).unwrap();
+
+        let second = run();
+        assert!(!second.status.success(), "backup symlink must fail closed");
+        let diagnostic = String::from_utf8_lossy(&second.stdout).to_string()
+            + &String::from_utf8_lossy(&second.stderr);
+        assert!(diagnostic.contains("recorded backup is not a regular file"));
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"outside file must never be followed"
+        );
+        assert_eq!(std::fs::read(&claude).unwrap(), installed);
+        assert!(std::fs::symlink_metadata(&backup)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
 }
 
 #[test]
