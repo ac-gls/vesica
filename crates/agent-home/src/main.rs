@@ -625,6 +625,19 @@ fn uninstall(r: Option<&Path>, dry: bool) -> Result<()> {
         }
     }
     let mut m = ah_core::Manifest::load(&p)?;
+    // Do not let atomic manifest persistence fail on a known collision after
+    // uninstall has already removed managed links or restored user files.
+    if !dry {
+        let temporary = p.with_extension("json.tmp");
+        match std::fs::symlink_metadata(&temporary) {
+            Ok(_) => anyhow::bail!(
+                "Vesica manifest temp file already exists: {}",
+                temporary.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
     // Validate every recorded backup before removing any managed entry so an
     // invalid backup cannot cause a partially completed uninstall.
     for (key, entry) in &m.entries {
