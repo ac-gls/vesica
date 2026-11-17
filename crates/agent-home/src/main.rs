@@ -616,7 +616,38 @@ Recorded entries: {}",
 fn uninstall(r: Option<&Path>, dry: bool) -> Result<()> {
     use sha2::Digest;
     let p = root(r)?.join(".config/agent-home/manifest.json");
+    if let Ok(metadata) = std::fs::symlink_metadata(&p) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            anyhow::bail!(
+                "Vesica manifest path must be a regular file: {}",
+                p.display()
+            );
+        }
+    }
     let mut m = ah_core::Manifest::load(&p)?;
+    // Validate every recorded backup before removing any managed entry so an
+    // invalid backup cannot cause a partially completed uninstall.
+    for (key, entry) in &m.entries {
+        if entry.kind != "managed-block" {
+            continue;
+        }
+        let Some(backup) = entry.backup.as_deref() else {
+            continue;
+        };
+        let metadata = std::fs::symlink_metadata(backup).with_context(|| {
+            format!("recorded backup is missing or unreadable for {key}: {backup}")
+        })?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            anyhow::bail!("recorded backup is not a regular file: {backup}");
+        }
+        if let Some(expected_hash) = entry.original_sha256.as_deref() {
+            let bytes = std::fs::read(backup)
+                .with_context(|| format!("reading recorded backup for {key}: {backup}"))?;
+            if hex::encode(sha2::Sha256::digest(&bytes)) != expected_hash {
+                anyhow::bail!("recorded backup was modified: {backup}");
+            }
+        }
+    }
     println!(
         "{} uninstall inspection",
         if dry {
@@ -710,6 +741,21 @@ fn uninstall(r: Option<&Path>, dry: bool) -> Result<()> {
                     continue;
                 };
                 let backup_path = backup_path.unwrap();
+                let metadata = match std::fs::symlink_metadata(backup_path) {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        println!("Skipped missing backup: {key}");
+                        retained.insert(key, entry);
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                if !metadata.is_file() || metadata.file_type().is_symlink() {
+                    anyhow::bail!(
+                        "recorded backup is not a regular file: {}",
+                        backup_path.display()
+                    );
+                }
                 let backup = std::fs::read(backup_path)?;
                 if hex::encode(sha2::Sha256::digest(&backup)) != expected_hash {
                     println!("Skipped altered backup: {key}");

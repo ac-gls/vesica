@@ -867,6 +867,72 @@ fn uninstall_restores_backed_up_user_content_if_nothing_changed() {
 }
 
 #[test]
+fn uninstall_refuses_to_follow_a_symlinked_recorded_backup() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("home");
+        let claude = root.join(".claude/CLAUDE.md");
+        let original = b"my preserved rules\n";
+        std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+        std::fs::write(&claude, original).unwrap();
+        Command::cargo_bin("vesica")
+            .unwrap()
+            .args(["install", "--home-repo"])
+            .arg(fixture_home())
+            .args(["--root"])
+            .arg(&root)
+            .assert()
+            .success();
+        let installed = std::fs::read(&claude).unwrap();
+        let manifest_path = root.join(".config/agent-home/manifest.json");
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        let recorded = &manifest["entries"][claude.to_string_lossy().as_ref()];
+        let backup = PathBuf::from(recorded["backup"].as_str().unwrap());
+        let expected = recorded["original_sha256"].as_str().unwrap();
+        let original_hash = hex::encode(sha2::Sha256::digest(original));
+        assert_eq!(expected, original_hash);
+        let outside = temp.path().join("outside-user-file");
+        // Matching original bytes ensure a hash-only check would incorrectly accept the symlink.
+        std::fs::write(&outside, original).unwrap();
+        std::fs::remove_file(&backup).unwrap();
+        symlink(&outside, &backup).unwrap();
+
+        let result = Command::cargo_bin("vesica")
+            .unwrap()
+            .args(["uninstall", "--root"])
+            .arg(&root)
+            .output()
+            .unwrap();
+        assert!(
+            !result.status.success(),
+            "uninstall must fail closed on a symlinked backup"
+        );
+        let diagnostic = String::from_utf8_lossy(&result.stdout).to_string()
+            + &String::from_utf8_lossy(&result.stderr);
+        assert!(diagnostic.contains("recorded backup is not a regular file"));
+        assert_eq!(std::fs::read(&claude).unwrap(), installed);
+        assert_eq!(std::fs::read(&outside).unwrap(), original);
+        assert!(
+            root.join("Team").exists(),
+            "preflight refusal must happen before removing any earlier manifest entries"
+        );
+        assert!(
+            root.join(".agents/skills/demo-skill").exists(),
+            "preflight refusal must preserve all managed links"
+        );
+        assert!(manifest_path.is_file(), "retain manifest for safe recovery");
+        assert!(std::fs::symlink_metadata(&backup)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+}
+
+#[test]
 fn uninstall_skips_a_user_modified_managed_file() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("home");
