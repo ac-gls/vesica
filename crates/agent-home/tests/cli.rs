@@ -933,6 +933,56 @@ fn uninstall_refuses_to_follow_a_symlinked_recorded_backup() {
 }
 
 #[test]
+fn uninstall_preserves_hashless_backup_and_retains_manifest_entry() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    let claude = root.join(".claude/CLAUDE.md");
+    std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+    std::fs::write(&claude, "user-authored Claude rules\n").unwrap();
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .success();
+
+    let installed = std::fs::read(&claude).unwrap();
+    let manifest_path = root.join(".config/agent-home/manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    let record = manifest["entries"][claude.to_string_lossy().as_ref()]
+        .as_object_mut()
+        .unwrap();
+    assert!(record.remove("original_sha256").is_some());
+    let backup = PathBuf::from(record["backup"].as_str().unwrap());
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+    std::fs::write(&manifest_path, &manifest_bytes).unwrap();
+
+    let result = Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "uninstall should preserve unverifiable legacy backup entries"
+    );
+    let diagnostic = String::from_utf8_lossy(&result.stdout).to_string()
+        + &String::from_utf8_lossy(&result.stderr);
+    assert!(diagnostic.contains("Skipped block without original hash"));
+    assert_eq!(std::fs::read(&claude).unwrap(), installed);
+    assert!(backup.is_file(), "preserve backup without a trusted hash");
+    assert!(!root.join("Team").exists());
+    assert!(!root.join(".agents/skills/demo-skill").exists());
+    let retained: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    assert!(retained["entries"][claude.to_string_lossy().as_ref()].is_object());
+}
+
+#[test]
 fn uninstall_skips_a_user_modified_managed_file() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("home");

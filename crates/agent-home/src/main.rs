@@ -634,6 +634,11 @@ fn uninstall(r: Option<&Path>, dry: bool) -> Result<()> {
         let Some(backup) = entry.backup.as_deref() else {
             continue;
         };
+        if entry.original_sha256.is_none() {
+            // Legacy manifests can lack hashes; let the legacy-safe per-entry
+            // path retain them without preventing unrelated entries cleaning up.
+            continue;
+        }
         let metadata = std::fs::symlink_metadata(backup).with_context(|| {
             format!("recorded backup is missing or unreadable for {key}: {backup}")
         })?;
