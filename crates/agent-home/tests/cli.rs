@@ -425,6 +425,7 @@ fn install_dry_run_shows_plan_without_mutating_the_selected_home() {
 fn install_preserves_and_backs_up_existing_user_configuration() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("user-home");
+    let config_dir = root.join(".config/agent-home");
     let claude = root.join(".claude/CLAUDE.md");
     let codex = root.join(".codex/AGENTS.md");
     std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
@@ -472,6 +473,11 @@ fn install_preserves_and_backs_up_existing_user_configuration() {
         backup_count_after_repeat, backup_count,
         "reinstall should not leave redundant backups"
     );
+    assert!(
+        std::fs::symlink_metadata(config_dir.join("manifest.json.tmp")).is_err(),
+        "a successful reinstall should not leave its atomic-save temp file"
+    );
+
     let codex_backup = std::fs::read_dir(codex.parent().unwrap())
         .unwrap()
         .filter_map(Result::ok)
