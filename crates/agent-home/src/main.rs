@@ -16,6 +16,7 @@ enum Command {
     Uninstall(UninstallOptions),
     Lint(LintOptions),
     VaultScan(VaultScanOptions),
+    Team(TeamOptions),
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ProfileArg {
@@ -78,6 +79,26 @@ struct LintOptions {
 }
 
 #[derive(Debug, clap::Args)]
+struct TeamStatusOptions {
+    #[arg(long, env = "VESICA_TEAM_HOME")]
+    path: Option<PathBuf>,
+}
+#[derive(Debug, clap::Args)]
+struct TeamPullOptions {
+    #[arg(long, env = "VESICA_TEAM_HOME")]
+    path: Option<PathBuf>,
+}
+#[derive(Debug, clap::Args)]
+struct TeamOptions {
+    #[command(subcommand)]
+    command: TeamCommand,
+}
+#[derive(Debug, Subcommand)]
+enum TeamCommand {
+    Status(TeamStatusOptions),
+    Pull(TeamPullOptions),
+}
+#[derive(Debug, clap::Args)]
 struct RootOptions {
     #[arg(long, env = "AGENT_HOME_ROOT", env = "VESICA_ROOT")]
     root: Option<PathBuf>,
@@ -104,8 +125,47 @@ fn run(cli: Cli) -> Result<()> {
         Command::Uninstall(o) => uninstall(o.root.as_deref(), o.dry_run),
         Command::Lint(o) => lint(&o.home_repo),
         Command::VaultScan(o) => vault_scan(&o.path),
+        Command::Team(o) => match o.command {
+            TeamCommand::Status(options) => team_status(&required_team_path(options.path)?),
+            TeamCommand::Pull(options) => team_pull(&required_team_path(options.path)?),
+        },
     }
 }
+fn required_team_path(path: Option<PathBuf>) -> Result<PathBuf> {
+    path.context("missing team checkout path: pass --path or set VESICA_TEAM_HOME")
+}
+
+fn team_status(path: &Path) -> Result<()> {
+    let status = ah_vault::shared_home_status(path)?;
+    println!("Shared home: {}", path.display());
+    println!("Branch: {}", status.branch);
+    println!(
+        "Upstream: {}",
+        status.upstream.as_deref().unwrap_or("(none)")
+    );
+    println!(
+        "Working tree: {}",
+        if status.clean { "clean" } else { "dirty" }
+    );
+    println!("Ahead: {}", status.ahead);
+    println!("Behind (last fetched): {}", status.behind);
+    println!("Read-only status; remote refs are not fetched.");
+    Ok(())
+}
+
+fn team_pull(path: &Path) -> Result<()> {
+    let result = ah_vault::pull_shared_home(path)?;
+    if result.old_head == result.new_head {
+        println!("Shared home already up to date ({})", result.new_head);
+    } else {
+        println!(
+            "Fast-forwarded {} from {} to {}",
+            result.upstream, result.old_head, result.new_head
+        );
+    }
+    Ok(())
+}
+
 fn lint(path: &Path) -> Result<()> {
     let findings = ah_vault::lint_shared_home(path)
         .with_context(|| format!("cannot lint shared home {}", path.display()))?;

@@ -14,11 +14,14 @@ curl -fsSL https://raw.githubusercontent.com/ac-gls/vesica/v0.1.0/install.sh \
 vesica doctor
 ```
 
-For a read-only validation pass against a local shared home:
+# Team checkout Git status and pull
 
 ```bash
-vesica lint --home-repo /path/to/shared-home
+vesica team status --path /path/to/shared-home
+vesica team pull --path /path/to/shared-home
 ```
+
+`status` reads local refs only and never fetches. `pull` fetches the configured upstream and fast-forwards only a clean checkout; it refuses uncommitted changes and non-fast-forward histories. The checkout path can also be provided with `VESICA_TEAM_HOME`. This does not yet implement shared-home bootstrap, `vesica share`, branch/PR creation, or the complete human-mediated contribution workflow.
 
 Finding output includes relative paths, line numbers and rule IDs; it deliberately omits document contents and matched credential text. The linter is heuristic and does not establish production readiness.
 

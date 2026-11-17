@@ -1,5 +1,277 @@
 //! Vault safety utilities and personal vault workflows.
 
+use anyhow::Context;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+/// Read-only view of a shared-home Git checkout. Remote refs are never refreshed here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedHomeStatus {
+    pub branch: String,
+    pub upstream: Option<String>,
+    pub clean: bool,
+    pub ahead: usize,
+    pub behind: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullResult {
+    pub old_head: String,
+    pub new_head: String,
+    pub upstream: String,
+}
+
+/// Inspect a shared-home checkout without fetching or changing any repository state.
+pub fn shared_home_status(path: &Path) -> anyhow::Result<SharedHomeStatus> {
+    let root = checkout_root(path)?;
+    let branch = git_output(&root, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+    let upstream = git_output_optional(
+        &root,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    )?;
+    let clean = git_output(
+        &root,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+    )?
+    .is_empty();
+    let (ahead, behind) = if upstream.is_some() {
+        let counts = git_output(
+            &root,
+            &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+        )?;
+        let mut counts = counts.split_whitespace();
+        let ahead = counts
+            .next()
+            .context("Git returned no ahead count")?
+            .parse()?;
+        let behind = counts
+            .next()
+            .context("Git returned no behind count")?
+            .parse()?;
+        (ahead, behind)
+    } else {
+        (0, 0)
+    };
+    Ok(SharedHomeStatus {
+        branch,
+        upstream,
+        clean,
+        ahead,
+        behind,
+    })
+}
+
+/// Fetch the configured upstream and fast-forward only a clean local branch.
+/// Local changes and divergent histories are preserved and reported, never merged.
+pub fn pull_shared_home(path: &Path) -> anyhow::Result<PullResult> {
+    let root = checkout_root(path)?;
+    let initial = shared_home_status(&root)?;
+    if !initial.clean {
+        anyhow::bail!(
+            "shared home has uncommitted changes; commit or preserve them before pulling"
+        );
+    }
+    let upstream = initial
+        .upstream
+        .context("shared-home branch has no configured upstream")?;
+    let (remote, branch) = upstream
+        .split_once('/')
+        .context("configured upstream must have the form remote/branch")?;
+    if remote == "." || remote.is_empty() || branch.is_empty() {
+        anyhow::bail!("configured upstream must name a remote branch");
+    }
+    let remote_ref = format!("refs/remotes/{upstream}");
+    let source_ref = format!("refs/heads/{branch}");
+    let refspec = format!("+{source_ref}:{remote_ref}");
+    git_output(&root, &["check-ref-format", &source_ref])?;
+    let old_head = git_output(&root, &["rev-parse", "HEAD"])?;
+    let old_remote_ref = git_output_optional(&root, &["rev-parse", "--verify", &remote_ref])?;
+    if let Some(old_remote_ref) = old_remote_ref.as_deref() {
+        let remote_relation = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args([
+                "merge-base",
+                "--is-ancestor",
+                old_remote_ref,
+                old_head.as_str(),
+            ])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("starting git merge-base")?;
+        if !remote_relation.success() {
+            anyhow::bail!(
+                "local branch has diverged from or rewound its recorded upstream; refusing pull"
+            );
+        }
+    }
+    git_output(&root, &["fetch", "--no-tags", remote, &refspec])?;
+    let fetched_ref = git_output(&root, &["rev-parse", "--verify", &remote_ref])?;
+    if let Some(old_remote_ref) = old_remote_ref.as_deref() {
+        if old_remote_ref != fetched_ref {
+            let remote_advance = Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args([
+                    "merge-base",
+                    "--is-ancestor",
+                    old_remote_ref,
+                    fetched_ref.as_str(),
+                ])
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .context("starting git merge-base")?;
+            if !remote_advance.success() {
+                anyhow::bail!("shared-home upstream was rewound or diverged; refusing pull");
+            }
+        }
+    }
+    let current_head = git_output(&root, &["rev-parse", "HEAD"])?;
+    if current_head != old_head {
+        anyhow::bail!("shared-home HEAD changed while fetching; refusing to pull");
+    }
+    let still_clean = git_output(
+        &root,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+    )?
+    .is_empty();
+    if !still_clean {
+        anyhow::bail!("shared home changed while fetching; refusing to pull");
+    }
+    let current_upstream = git_output_optional(
+        &root,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    )?;
+    if current_upstream.as_deref() != Some(upstream.as_str()) {
+        anyhow::bail!("shared-home upstream changed while fetching; refusing to pull");
+    }
+    if old_remote_ref.is_some() {
+        let ancestry = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["merge-base", "--is-ancestor", "HEAD", remote_ref.as_str()])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("starting git merge-base")?;
+        if !ancestry.success() {
+            anyhow::bail!("shared-home history is divergent or cannot be verified; refusing non-fast-forward pull");
+        }
+    }
+    let still_clean = git_output(
+        &root,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+    )?
+    .is_empty();
+    if !still_clean {
+        anyhow::bail!("shared home changed before fast-forward; refusing to pull");
+    }
+    let final_head = git_output(&root, &["rev-parse", "HEAD"])?;
+    if final_head != old_head {
+        anyhow::bail!("shared-home HEAD changed before fast-forward; refusing to pull");
+    }
+    git_output(&root, &["merge", "--ff-only", remote_ref.as_str()])?;
+    let new_head = git_output(&root, &["rev-parse", "HEAD"])?;
+    Ok(PullResult {
+        old_head,
+        new_head,
+        upstream,
+    })
+}
+
+fn checkout_root(path: &Path) -> anyhow::Result<PathBuf> {
+    let root = path
+        .canonicalize()
+        .with_context(|| format!("shared-home path does not exist: {}", path.display()))?;
+    let top = git_output(&root, &["rev-parse", "--show-toplevel"])?;
+    let top = PathBuf::from(top).canonicalize()?;
+    if root != top {
+        anyhow::bail!(
+            "shared-home path must be the Git checkout root: {}",
+            root.display()
+        );
+    }
+    Ok(root)
+}
+
+fn git_output(path: &Path, args: &[&str]) -> anyhow::Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| {
+            format!(
+                "starting git {}",
+                args.first().copied().unwrap_or("command")
+            )
+        })?;
+    if !output.status.success() {
+        let diagnostic = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        anyhow::bail!(
+            "git {} failed{}",
+            args.first().copied().unwrap_or("command"),
+            if diagnostic.is_empty() {
+                String::new()
+            } else {
+                format!(": {diagnostic}")
+            }
+        );
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
+fn git_output_optional(path: &Path, args: &[&str]) -> anyhow::Result<Option<String>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| {
+            format!(
+                "starting git {}",
+                args.first().copied().unwrap_or("command")
+            )
+        })?;
+    if output.status.success() {
+        Ok(Some(String::from_utf8(output.stdout)?.trim().to_owned()))
+    } else {
+        Ok(None)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecretFinding {
     pub path: std::path::PathBuf,

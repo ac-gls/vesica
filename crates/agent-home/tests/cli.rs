@@ -7,6 +7,144 @@ fn fixture_home() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/shared-home")
 }
 
+struct SharedGitFixture {
+    _temp: tempfile::TempDir,
+    remote: PathBuf,
+    local: PathBuf,
+}
+impl SharedGitFixture {
+    fn new() -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let remote = temp.path().join("remote.git");
+        let seed = temp.path().join("seed");
+        let local = temp.path().join("local");
+        run_git(temp.path(), ["init", "--bare", remote.to_str().unwrap()]);
+        run_git(temp.path(), ["init", "-b", "main", seed.to_str().unwrap()]);
+        run_git(&seed, ["config", "user.name", "Vesica Test"]);
+        run_git(&seed, ["config", "user.email", "vesica@example.invalid"]);
+        std::fs::write(seed.join("README.md"), "shared home\\n").unwrap();
+        run_git(&seed, ["add", "README.md"]);
+        run_git(&seed, ["commit", "-m", "initial"]);
+        run_git(&seed, ["remote", "add", "origin", remote.to_str().unwrap()]);
+        run_git(&seed, ["push", "-u", "origin", "main"]);
+        run_git(&remote, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+        run_git(
+            temp.path(),
+            ["clone", remote.to_str().unwrap(), local.to_str().unwrap()],
+        );
+        run_git(&local, ["config", "user.name", "Vesica Test"]);
+        run_git(&local, ["config", "user.email", "vesica@example.invalid"]);
+        Self {
+            _temp: temp,
+            remote,
+            local,
+        }
+    }
+    fn advance_remote(&self) {
+        let update = self._temp.path().join("update");
+        run_git(
+            self._temp.path(),
+            [
+                "clone",
+                self.remote.to_str().unwrap(),
+                update.to_str().unwrap(),
+            ],
+        );
+        run_git(&update, ["config", "user.name", "Vesica Test"]);
+        run_git(&update, ["config", "user.email", "vesica@example.invalid"]);
+        std::fs::write(update.join("shared.md"), "approved update\\n").unwrap();
+        run_git(&update, ["add", "shared.md"]);
+        run_git(&update, ["commit", "-m", "approved update"]);
+        run_git(&update, ["push", "origin", "HEAD:main"]);
+    }
+}
+fn run_git<I, S>(cwd: &std::path::Path, args: I)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn team_cli_reports_and_fast_forwards_the_shared_checkout() {
+    let fixture = SharedGitFixture::new();
+    fixture.advance_remote();
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["team", "status", "--path"])
+        .arg(&fixture.local)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Working tree: clean"))
+        .stdout(predicate::str::contains("origin/main"));
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["team", "pull", "--path"])
+        .arg(&fixture.local)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Fast-forwarded origin/main"));
+    assert_eq!(
+        std::fs::read_to_string(fixture.local.join("shared.md")).unwrap(),
+        "approved update\\n"
+    );
+}
+
+#[test]
+fn team_cli_rejects_dirty_checkout_without_overwriting_local_content() {
+    let fixture = SharedGitFixture::new();
+    std::fs::write(
+        fixture.local.join("README.md"),
+        "personal uncommitted edit\\n",
+    )
+    .unwrap();
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["team", "pull", "--path"])
+        .arg(&fixture.local)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("uncommitted changes"));
+    assert_eq!(
+        std::fs::read_to_string(fixture.local.join("README.md")).unwrap(),
+        "personal uncommitted edit\\n"
+    );
+}
+
+#[test]
+fn team_cli_uses_team_home_environment_variable() {
+    let fixture = SharedGitFixture::new();
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["team", "status"])
+        .env("VESICA_TEAM_HOME", &fixture.local)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Branch: main"));
+}
+
+#[test]
+fn help_exposes_team_status_and_pull_commands() {
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["team", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("status"))
+        .stdout(predicate::str::contains("pull"));
+}
+
 #[test]
 fn cli_identifies_itself_as_vesica() {
     Command::cargo_bin("vesica")
