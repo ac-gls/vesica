@@ -983,6 +983,65 @@ fn uninstall_preserves_hashless_backup_and_retains_manifest_entry() {
 }
 
 #[test]
+fn uninstall_manifest_temp_obstruction_preserves_all_managed_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .success();
+
+    let claude = root.join(".claude/CLAUDE.md");
+    std::fs::write(&claude, "user-authored replacement\n").unwrap();
+    let config_before = std::fs::read(&claude).unwrap();
+    let managed_links: Vec<_> = [
+        ".agents/skills/demo-skill",
+        ".agents/skills/second-skill",
+        ".claude/skills/demo-skill",
+        ".claude/skills/second-skill",
+        "Team",
+    ]
+    .iter()
+    .map(|relative| root.join(relative))
+    .collect();
+    let manifest_path = root.join(".config/agent-home/manifest.json");
+    let manifest_before = std::fs::read(&manifest_path).unwrap();
+    let obstruction = root.join(".config/agent-home/manifest.json.tmp");
+    std::fs::create_dir(&obstruction).unwrap();
+
+    let result = Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    let diagnostic = String::from_utf8_lossy(&result.stdout).to_string()
+        + &String::from_utf8_lossy(&result.stderr);
+    assert!(diagnostic.contains("manifest temp file"));
+    assert_eq!(std::fs::read(&claude).unwrap(), config_before);
+    assert_eq!(std::fs::read(&manifest_path).unwrap(), manifest_before);
+    assert!(obstruction.is_dir());
+    for path in managed_links {
+        let metadata = std::fs::symlink_metadata(&path).unwrap_or_else(|error| {
+            panic!(
+                "managed link should remain after failed uninstall: {} ({error})",
+                path.display()
+            )
+        });
+        assert!(
+            metadata.file_type().is_symlink(),
+            "managed link should remain after failed uninstall: {}",
+            path.display()
+        );
+    }
+}
+
+#[test]
 fn uninstall_skips_a_user_modified_managed_file() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("home");
