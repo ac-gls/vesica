@@ -11,7 +11,7 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
-serde_yaml = "0.9"
+yaml-rust2 = { version = "0.13", default-features = false }
 regex.workspace = true
 walkdir.workspace = true
 

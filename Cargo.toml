@@ -35,7 +35,6 @@ jsonc-parser = { version = "0.34", features = ["cst", "serde"] }
 sha2 = "0.11"
 hex = "0.4"
 tempfile = "3"
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 regex = "1"
 walkdir = "2"
 

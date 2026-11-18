@@ -228,3 +228,55 @@ fn lint_flags_known_secret_pattern_without_emitting_value() {
     assert_eq!(finding.line, 2);
     assert!(!format!("{finding:?}").contains(&marker));
 }
+
+/// Characterisation tests pinning frontmatter semantics across YAML parser changes.
+fn lint_note(frontmatter: &str) -> Vec<&'static str> {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("Knowledge")).unwrap();
+    std::fs::write(
+        temp.path().join("Knowledge/README.md"),
+        "---\ntitle: Knowledge\ncreated: 2026-11-16\nupdated: 2026-11-16\ntype: readme\narea: team\ntags: [index]\nowner: team\nauthority: working\n---\n# Knowledge\n\n- [[note]]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("Knowledge/note.md"),
+        format!("---\n{frontmatter}---\nbody\n"),
+    )
+    .unwrap();
+    let mut rules: Vec<_> = lint_shared_home(temp.path())
+        .unwrap()
+        .into_iter()
+        .filter(|f| f.path == Path::new("Knowledge/note.md"))
+        .map(|f| f.rule)
+        .collect();
+    rules.sort_unstable();
+    rules
+}
+
+const VALID: &str = "title: Note\ncreated: 2026-11-16\nupdated: 2026-11-16\ntype: note\narea: team\ntags: [demo]\nowner: team\nauthority: working\n";
+
+#[test]
+fn frontmatter_semantics_are_stable() {
+    assert!(lint_note(VALID).is_empty(), "{:?}", lint_note(VALID));
+    // Unquoted ISO dates are accepted as text.
+    assert!(lint_note(&VALID.replace("2026-11-16", "'2026-11-16'")).is_empty());
+    // A duplicate key makes the metadata ambiguous: invalid YAML.
+    assert_eq!(
+        lint_note(&format!("{VALID}owner: someone-else\n")),
+        ["VSH008"]
+    );
+    // A non-text title is an invalid required field.
+    assert_eq!(
+        lint_note(&VALID.replace("title: Note", "title: 2026")),
+        ["VSH009"]
+    );
+    // Block-style tag lists are sequences too.
+    assert!(lint_note(&VALID.replace("tags: [demo]", "tags:\n  - demo\n  - other")).is_empty());
+    // Empty frontmatter is not a mapping.
+    assert_eq!(lint_note(""), ["VSH008"]);
+    // A null source on a mirror is missing.
+    assert_eq!(
+        lint_note(&VALID.replace("authority: working", "authority: mirror\nsource: ~")),
+        ["VSH011"]
+    );
+}
