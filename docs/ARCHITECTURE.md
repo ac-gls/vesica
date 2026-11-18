@@ -11,6 +11,8 @@ vesica CLI
   ├─ update   resolve a release (or --tag), curl the tarball + SHA256SUMS, verify the SHA-256 and
   │           that the binary reports the tag's version, rename it into place, re-link from the
   │           recorded manifest; staging is always removed and failures leave the binary alone
+  ├─ new-skill scaffold Agents/Skills/<name>/SKILL.md on a new skill/<name> branch (committed,
+  │           never pushed); refuses a dirty checkout, an existing skill or branch, unsafe names
   ├─ status   read the install manifest and report recorded entries
   ├─ uninstall verify hashes/links, then remove or restore only managed entries
   ├─ team status/pull  inspect local shared-home refs / guarded fast-forward pull
@@ -54,6 +56,10 @@ shared-home checkout
 - unknown keys allowed, as the parser ignores them.
 
 The TOML schema validates the document after conversion to JSON (for example with Taplo's `#:schema` directive). `crates/ah-core/tests/schema_parity.rs` is the contract: every corpus case must get the same verdict from `AgentHomeConfig::parse`/`FoundryCatalog::parse` and from the schema (validated with `boon`, a dev-only dependency). A rule changed in one place and not the other fails CI.
+
+## Git usage
+
+All Git access goes through `crates/ah-vault/src/git.rs`. `isolated` blanks system and global config for read-only structural checks and pulls, so results don't depend on local config; `user` keeps the person's own identity and hooks for anything that creates commits (`vault snapshot`, `new-skill`). Nothing in Vesica pushes.
 
 ## Safety and transaction
 

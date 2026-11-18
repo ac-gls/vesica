@@ -4,6 +4,11 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+### Added
+- `vesica new-skill <name>` (plan §5.4): scaffolds `Agents/Skills/<name>/SKILL.md` in the shared home **on a new `skill/<name>` branch**, committed locally and never pushed, so a person edits it and opens the PR. It refuses a dirty checkout, an existing skill, an existing branch, and unsafe names (1–64 lowercase characters, digits, `-` or `_`). `--description` sets the one-line description; without it the scaffold carries a visible TODO placeholder. The scaffold passes `vesica lint` and `vesica vault-scan` as-is. `--dry-run` prints the plan.
+  - A shared home that isn't a Git repository is scaffolded without a branch or commit.
+  - If the commit fails, the checkout is restored and the branch removed, so no half-written branch is left behind.
+
 ## [0.1.0-alpha.2] - 2026-11-18
 
 Second pre-release, still a prototype for disposable trials on native Linux x86_64. Adds `vesica update`, which installs a newer release of the app itself after verifying its checksum and reported version, and the vault primitives and `install --vault` from the previous unreleased work.

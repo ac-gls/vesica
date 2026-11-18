@@ -25,6 +25,8 @@ enum Command {
     Vault(VaultOptions),
     /// Download a release, verify it and replace this binary, then re-link
     Update(UpdateOptions),
+    /// Scaffold a skill on a branch in the shared home
+    NewSkill(NewSkillOptions),
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ProfileArg {
@@ -117,6 +119,25 @@ struct TeamOptions {
 enum TeamCommand {
     Status(TeamStatusOptions),
     Pull(TeamPullOptions),
+}
+#[derive(Debug, clap::Args)]
+struct NewSkillOptions {
+    /// Skill name (lowercase, digits, '-' or '_'; also the folder name)
+    name: String,
+    #[arg(
+        long,
+        env = "VESICA_HOME_REPO",
+        env = "AGENT_HOME_REPO",
+        help = "Shared-home checkout to scaffold the skill in"
+    )]
+    home_repo: PathBuf,
+    #[arg(
+        long,
+        help = "One-line description, e.g. Use when ... (default: a TODO placeholder)"
+    )]
+    description: Option<String>,
+    #[arg(long)]
+    dry_run: bool,
 }
 #[derive(Debug, clap::Args)]
 struct UpdateOptions {
@@ -229,6 +250,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::VaultScan(o) => vault_scan(&o.path),
         Command::Vault(o) => vault(o.command),
         Command::Update(o) => update(o),
+        Command::NewSkill(o) => new_skill(o),
         Command::Team(o) => match o.command {
             TeamCommand::Status(options) => team_status(&required_team_path(options.path)?),
             TeamCommand::Pull(options) => team_pull(&required_team_path(options.path)?),
@@ -464,6 +486,44 @@ fn relink_from_manifest(o: &UpdateOptions) -> Result<()> {
         repos_dir: o.repos_dir.clone(),
         vault: manifest.vault.as_ref().map(PathBuf::from),
     })
+}
+
+/// `vesica new-skill` (plan §5.4): scaffold a skill on a branch. A person edits it and opens the
+/// PR; nothing is pushed, and the current branch is never written to.
+fn new_skill(o: NewSkillOptions) -> Result<()> {
+    let shared = o
+        .home_repo
+        .canonicalize()
+        .with_context(|| format!("shared-home path does not exist: {}", o.home_repo.display()))?;
+    let scaffold = ah_vault::new_skill(&shared, &o.name, o.description.as_deref(), o.dry_run)?;
+    println!(
+        "{}: {}",
+        if o.dry_run { "Would create" } else { "Created" },
+        scaffold.path
+    );
+    match (&scaffold.branch, scaffold.committed) {
+        (Some(branch), true) => {
+            println!("Branch: {branch} (committed locally; nothing was pushed)");
+            println!(
+                "Next: edit {} in {}, then run `vesica lint --home-repo {}` and `vesica vault-scan --path {}`, and open a PR for review.",
+                scaffold.path,
+                shared.display(),
+                shared.display(),
+                shared.join(&scaffold.path).display()
+            );
+        }
+        (Some(branch), false) => println!("Would create branch: {branch}"),
+        (None, _) => println!(
+            "{} is not a Git repository: the file was written without a branch or commit",
+            shared.display()
+        ),
+    }
+    if o.description.is_none() {
+        println!(
+            "Note: the scaffold carries a TODO description; replace it before opening the PR."
+        );
+    }
+    Ok(())
 }
 
 fn utc_date() -> String {
