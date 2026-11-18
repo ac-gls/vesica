@@ -4,6 +4,10 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+## [0.1.0-alpha.3] - 2026-11-18
+
+Third pre-release, still a prototype for disposable trials on native Linux x86_64. It brings the release in line with the documented command set: `share`, `new-skill` and `sync-standards` exist here (they did not in `alpha.2`, which ONBOARDING already described), alongside `install --vault` and `update`.
+
 ### Added
 - `doctor` (text and `--json`) reports whether a **Git identity** is available, as an optional entry: the commit-writing commands (`vault snapshot`, `new-skill`, `share`) need one, while `install` does not. It is informational and never a blocker.
 

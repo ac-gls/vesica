@@ -5,7 +5,7 @@ team rules, shared skills and repository pointers come from a separate, private 
 repository, and each developer's personal vault stays private. This repository holds only the
 tool. The CI content guard keeps team content out of it.
 
-> **Pre-release prototype (`v0.1.0-alpha.2`).** Validated on native Linux x86_64 (Ubuntu 24.04
+> **Pre-release prototype (`v0.1.0-alpha.3`).** Validated on native Linux x86_64 (Ubuntu 24.04
 > and 22.04). Only some of the target architecture is built: no shared-home bootstrap, no `vesica share`,
 > no Foundry, Herdr or Hermes integration, and only Claude Code and Codex instruction wiring.
 > **Do not use it on your real home directory yet.** Try it with a disposable `--root`.
@@ -14,7 +14,7 @@ tool. The CI content guard keeps team content out of it.
 
 ```bash
 # Install the binary only (downloads the release and verifies SHA256SUMS; no sudo).
-curl -fsSL https://raw.githubusercontent.com/ac-gls/vesica/v0.1.0-alpha.2/install.sh | sh -s -- --bootstrap-only
+curl -fsSL https://raw.githubusercontent.com/ac-gls/vesica/v0.1.0-alpha.3/install.sh | sh -s -- --bootstrap-only
 
 # Point at a local checkout of your team's shared home and a throwaway root.
 SHARED=/path/to/shared-home-checkout

@@ -2,7 +2,7 @@
 # Linux bootstrap: download the pinned Linux x86_64 release binary, verify its sha256,
 # install it to ~/.local/bin, then hand over to `vesica install "$@"`. Everything else lives in the binary.
 #
-#   curl -fsSL https://raw.githubusercontent.com/ac-gls/vesica/v0.1.0-alpha.2/install.sh | sh -s -- --bootstrap-only
+#   curl -fsSL https://raw.githubusercontent.com/ac-gls/vesica/v0.1.0-alpha.3/install.sh | sh -s -- --bootstrap-only
 #
 # Without --bootstrap-only, the remaining arguments are passed to `vesica install`
 # (e.g. --home-repo /path/to/shared-home-checkout --root /tmp/vesica-trial).
@@ -12,7 +12,7 @@
 #   --bootstrap-only        install the binary but do not run `vesica install`
 set -eu
 
-VERSION="${VESICA_VERSION:-${AGENT_HOME_VERSION:-v0.1.0-alpha.2}}"
+VERSION="${VESICA_VERSION:-${AGENT_HOME_VERSION:-v0.1.0-alpha.3}}"
 REPO="${VESICA_REPO:-${AGENT_HOME_REPO:-ac-gls/vesica}}"
 BIN_DIR="${VESICA_BIN_DIR:-${AGENT_HOME_BIN_DIR:-$HOME/.local/bin}}"
 ASSET="vesica-${VERSION}-x86_64-linux.tar.gz"
