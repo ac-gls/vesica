@@ -81,6 +81,17 @@ Findings print `path:line:rule: message` and never the offending text.
 | VSH014 | The skill's `name` doesn't match its folder name. |
 | VSH015 | The skill's `description` is missing or blank. |
 
+## `vesica new-skill`
+
+| Message | Fix |
+|---|---|
+| `… has uncommitted changes; commit or stash them before scaffolding a skill` | The shared-home checkout is dirty. Commit or stash first; Vesica won't mix your edits into the scaffold commit. |
+| `skill <name> already exists (Agents/Skills/<name>/SKILL.md)` | Pick another name, or edit the existing skill. |
+| `branch skill/<name> already exists` | A previous attempt left the branch. Delete it (`git branch -D skill/<name>`) or use another name. |
+| `skill name must be 1-64 lowercase ASCII letters, digits, '-' or '_' …` | Fix the name. It's also the folder name. |
+| `git commit failed: Author identity unknown` | `new-skill` commits with **your** Git identity. Set `git config --global user.name` and `user.email`. |
+| `… is not a shared home (no Agents/ directory)` | `--home-repo` must point at a shared-home checkout. |
+
 ## `vesica update`
 
 | Message | Meaning / fix |

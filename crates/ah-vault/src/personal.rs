@@ -520,36 +520,10 @@ pub fn snapshot(vault: &Path, message: &str) -> anyhow::Result<SnapshotOutcome> 
 
 /// Git with the person's own configuration (identity, hooks), no prompts.
 fn git_user(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
-    run_git(dir, args, false)
+    crate::git::user(dir, args)
 }
 
 /// Git isolated from user and system configuration, for structural checks.
 fn git_isolated(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
-    run_git(dir, args, true)
-}
-
-fn run_git(dir: &Path, args: &[&str], isolated: bool) -> anyhow::Result<String> {
-    let mut command = Command::new("git");
-    command
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null());
-    if isolated {
-        command
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null");
-    }
-    let output = command
-        .output()
-        .with_context(|| format!("starting git {}", args[0]))?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "git {} failed: {}",
-            args[0],
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8(output.stdout)?)
+    crate::git::isolated(dir, args)
 }

@@ -2,6 +2,8 @@
 
 pub mod personal;
 
+pub(crate) mod git;
+
 use anyhow::Context;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -278,6 +280,122 @@ fn git_output_optional(path: &Path, args: &[&str]) -> anyhow::Result<Option<Stri
 pub struct SecretFinding {
     pub path: std::path::PathBuf,
     pub line: usize,
+}
+
+/// Outcome of [`new_skill`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillScaffold {
+    /// Path relative to the shared home.
+    pub path: String,
+    pub branch: Option<String>,
+    pub committed: bool,
+}
+
+/// Scaffold a skill in the shared home on a branch (plan §5.4). A person runs this, edits the
+/// scaffold and opens the PR: nothing is ever pushed, and the current branch is never written to.
+pub fn new_skill(
+    shared: &std::path::Path,
+    name: &str,
+    description: Option<&str>,
+    dry_run: bool,
+) -> anyhow::Result<SkillScaffold> {
+    validate_skill_name(name)?;
+    if !shared.is_dir() || !shared.join("Agents").is_dir() {
+        anyhow::bail!(
+            "{} is not a shared home (no Agents/ directory)",
+            shared.display()
+        );
+    }
+    let relative = format!("Agents/Skills/{name}/SKILL.md");
+    let path = shared.join(&relative);
+    if path.exists() || shared.join("Agents/Skills").join(name).exists() {
+        anyhow::bail!("skill {name} already exists ({relative})");
+    }
+    let branch = format!("skill/{name}");
+    let body = skill_scaffold(name, description);
+    if !git::is_repository(shared) {
+        if !dry_run {
+            std::fs::create_dir_all(path.parent().unwrap_or(shared))?;
+            std::fs::write(&path, body)?;
+        }
+        return Ok(SkillScaffold {
+            path: relative,
+            branch: None,
+            committed: false,
+        });
+    }
+    if !git::isolated(shared, &["status", "--porcelain"])?.is_empty() {
+        anyhow::bail!(
+            "{} has uncommitted changes; commit or stash them before scaffolding a skill",
+            shared.display()
+        );
+    }
+    let branches = git::isolated(shared, &["branch", "--list", &branch])?;
+    if !branches.trim().is_empty() {
+        anyhow::bail!("branch {branch} already exists");
+    }
+    if !git::isolated(shared, &["ls-files", "--", &relative])?.is_empty() {
+        anyhow::bail!("skill {name} already exists ({relative})");
+    }
+    if dry_run {
+        return Ok(SkillScaffold {
+            path: relative,
+            branch: Some(branch),
+            committed: false,
+        });
+    }
+    git::isolated(shared, &["checkout", "-q", "-b", &branch])?;
+    let written = (|| -> anyhow::Result<()> {
+        std::fs::create_dir_all(path.parent().unwrap_or(shared))?;
+        std::fs::write(&path, body)?;
+        git::isolated(shared, &["add", "--", &relative])?;
+        git::user(
+            shared,
+            &["commit", "-q", "-m", &format!("Add {name} skill")],
+        )?;
+        Ok(())
+    })();
+    if written.is_err() {
+        // Leave the checkout as it was found rather than on a half-written branch.
+        let _ = git::isolated(shared, &["checkout", "-q", "-f", "-"]);
+        let _ = git::isolated(shared, &["branch", "-D", &branch]);
+    }
+    written?;
+    Ok(SkillScaffold {
+        path: relative,
+        branch: Some(branch),
+        committed: true,
+    })
+}
+
+/// Skill names mirror folder names: lowercase, digits, `-` and `_`, at most 64 characters.
+fn validate_skill_name(name: &str) -> anyhow::Result<()> {
+    let safe = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_'))
+        && !name.starts_with(['-', '.'])
+        && !name.ends_with('-');
+    if !safe {
+        anyhow::bail!(
+            "skill name must be 1-64 lowercase ASCII letters, digits, '-' or '_', not starting with '-' or '.' and not ending with '-'"
+        );
+    }
+    Ok(())
+}
+
+/// The scaffold skill-lint accepts: a name matching the folder and a non-empty description.
+fn skill_scaffold(name: &str, description: Option<&str>) -> String {
+    let placeholder =
+        "TODO: describe when to use this skill, in one line starting with: Use when ...";
+    let description = description
+        .unwrap_or(placeholder)
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    format!(
+        "---\nname: {name}\ndescription: \"{description}\"\n---\n\n# {name}\n\n## When to use\n\n## How\n\n## Notes\n"
+    )
 }
 
 /// A stable, secret-safe lint diagnostic. `message` contains rule-specific prose only.
