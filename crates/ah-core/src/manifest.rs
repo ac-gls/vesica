@@ -30,6 +30,9 @@ pub struct Manifest {
     pub app_version: String,
     pub shared_home: String,
     pub profile: String,
+    /// Personal vault linked by `install --vault`, so `update` re-links to the same place.
+    #[serde(default)]
+    pub vault: Option<String>,
     #[serde(default)]
     pub entries: BTreeMap<String, ManifestEntry>,
 }
@@ -41,6 +44,7 @@ impl Default for Manifest {
             app_version: env!("CARGO_PKG_VERSION").into(),
             shared_home: String::new(),
             profile: "developer".into(),
+            vault: None,
             entries: BTreeMap::new(),
         }
     }

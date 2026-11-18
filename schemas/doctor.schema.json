@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/ac-gls/vesica/main/schemas/doctor.schema.json",
+  "title": "Vesica doctor report (vesica doctor --json)",
+  "description": "Read-only preflight report. `status` is blocked when any blocker is present; blockers exit non-zero. Unimplemented integrations must be reported as not-implemented, never as green.",
+  "type": "object",
+  "required": [
+    "status",
+    "blockers",
+    "platform",
+    "prerequisites",
+    "shared_home",
+    "team",
+    "profile",
+    "repos_in_config",
+    "repos",
+    "foundry_deployments",
+    "wsl_kernel",
+    "live_harness",
+    "foundry",
+    "windows",
+    "herdr"
+  ],
+  "properties": {
+    "status": {
+      "enum": [
+        "ok",
+        "blocked"
+      ]
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Human-readable blockers; each one makes status \"blocked\"."
+    },
+    "platform": {
+      "type": "object",
+      "required": [
+        "os",
+        "arch",
+        "kernel",
+        "distro"
+      ],
+      "properties": {
+        "os": {
+          "type": "string"
+        },
+        "arch": {
+          "type": "string"
+        },
+        "kernel": {
+          "type": "string",
+          "description": "Kernel release string."
+        },
+        "distro": {
+          "type": "string"
+        }
+      }
+    },
+    "prerequisites": {
+      "type": "object",
+      "required": [
+        "required",
+        "optional"
+      ],
+      "properties": {
+        "required": {
+          "type": "object",
+          "required": [
+            "git",
+            "gh",
+            "curl",
+            "sha256sum"
+          ],
+          "additionalProperties": {
+            "enum": [
+              "found",
+              "missing"
+            ]
+          },
+          "description": "Install step 1 required commands."
+        },
+        "optional": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Optional integrations, e.g. \"missing\", \"found: 22.15.0\"."
+        }
+      }
+    },
+    "shared_home": {
+      "const": "valid",
+      "description": "The shared-home configuration loaded."
+    },
+    "team": {
+      "type": "object",
+      "required": [
+        "name",
+        "org"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "org": {
+          "type": "string"
+        }
+      }
+    },
+    "profile": {
+      "enum": [
+        "core",
+        "developer",
+        "lead"
+      ]
+    },
+    "repos_in_config": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "repos": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Repository names eligible for the selected profile."
+    },
+    "foundry_deployments": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "wsl_kernel": {
+      "enum": [
+        "detected",
+        "not detected"
+      ],
+      "description": "Informational only; WSL is not the validated platform."
+    },
+    "live_harness": {
+      "const": "not-implemented"
+    },
+    "foundry": {
+      "const": "not-implemented"
+    },
+    "windows": {
+      "const": "not-implemented"
+    },
+    "herdr": {
+      "const": "not-implemented"
+    }
+  }
+}

@@ -8,6 +8,9 @@ vesica CLI
   │           node minimum); blockers exit non-zero; WSL status informational; optional --json
   ├─ install  build a plan; preflight destinations/manifest; back up existing
   │           Claude/Codex instruction files and ~/.bashrc; execute supported actions; save manifest
+  ├─ update   resolve a release (or --tag), curl the tarball + SHA256SUMS, verify the SHA-256 and
+  │           that the binary reports the tag's version, rename it into place, re-link from the
+  │           recorded manifest; staging is always removed and failures leave the binary alone
   ├─ status   read the install manifest and report recorded entries
   ├─ uninstall verify hashes/links, then remove or restore only managed entries
   ├─ team status/pull  inspect local shared-home refs / guarded fast-forward pull
@@ -81,6 +84,8 @@ These are Linux/WSL development-container results. Installer fixtures simulate L
 9. Secret scan output contains locations only. Scanner limits individual files to 2 MB and does not traverse symlinks.
 
 ## Release
+
+`vesica update` consumes a published release: it resolves the newest tag from the GitHub releases API (or `--tag`), downloads `vesica-<tag>-x86_64-linux.tar.gz` and `SHA256SUMS` with `curl`, verifies the checksum in-process, and requires the extracted binary to report the tag's version before an atomic `rename`. `VESICA_RELEASE_BASE_URL` and `VESICA_RELEASES_API_URL` point the commands elsewhere (tests use `file://`).
 
 `scripts/build-release.sh <tag>` builds the `x86_64-unknown-linux-musl` binary and checks that it's fully static: no `INTERP` segment and no `NEEDED` entries. It's static-PIE, which keeps ASLR; older `file` versions call that "dynamically linked". It also checks that the binary reports the tag's version. It packages `vesica-<tag>-x86_64-linux.tar.gz` reproducibly (commit timestamp, sorted entries, `gzip -n`) and writes `SHA256SUMS`. It refuses a tag that doesn't match the workspace version or `install.sh`'s default version.
 

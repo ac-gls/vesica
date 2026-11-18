@@ -1,4 +1,5 @@
 mod preflight;
+mod release;
 mod repos;
 
 use anyhow::{Context, Result};
@@ -22,6 +23,8 @@ enum Command {
     Team(TeamOptions),
     /// Personal vault: create, adopt, check, ledger notes and snapshots
     Vault(VaultOptions),
+    /// Download a release, verify it and replace this binary, then re-link
+    Update(UpdateOptions),
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ProfileArg {
@@ -116,6 +119,34 @@ enum TeamCommand {
     Pull(TeamPullOptions),
 }
 #[derive(Debug, clap::Args)]
+struct UpdateOptions {
+    #[arg(
+        long,
+        help = "Release tag to install (default: the newest published release)"
+    )]
+    tag: Option<String>,
+    #[arg(
+        long,
+        value_enum,
+        default_value = "alpha",
+        help = "alpha includes pre-releases"
+    )]
+    channel: ChannelArg,
+    #[arg(long, help = "Binary to replace (default: this executable)")]
+    target: Option<PathBuf>,
+    #[arg(long, env = "AGENT_HOME_ROOT", env = "VESICA_ROOT")]
+    root: Option<PathBuf>,
+    #[arg(long, env = "VESICA_REPOS_DIR")]
+    repos_dir: Option<PathBuf>,
+    #[arg(long)]
+    dry_run: bool,
+}
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ChannelArg {
+    Alpha,
+    Stable,
+}
+#[derive(Debug, clap::Args)]
 struct VaultOptions {
     #[command(subcommand)]
     command: VaultCommand,
@@ -197,6 +228,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Lint(o) => lint(&o.home_repo),
         Command::VaultScan(o) => vault_scan(&o.path),
         Command::Vault(o) => vault(o.command),
+        Command::Update(o) => update(o),
         Command::Team(o) => match o.command {
             TeamCommand::Status(options) => team_status(&required_team_path(options.path)?),
             TeamCommand::Pull(options) => team_pull(&required_team_path(options.path)?),
@@ -323,6 +355,115 @@ fn print_vault_changes(changes: &[ah_vault::personal::VaultChange], dry: bool) -
         println!("{line}");
     }
     any
+}
+
+/// `vesica update` (plan §5.4): resolve a release, download and verify it, replace the binary,
+/// then re-link from the recorded manifest. The staged download lives beside the target so the
+/// final `rename` is atomic, and it is removed whatever happens.
+fn update(o: UpdateOptions) -> Result<()> {
+    let tag = match &o.tag {
+        Some(tag) => {
+            release::validate_tag(tag)?;
+            tag.clone()
+        }
+        None => {
+            let api = std::env::var("VESICA_RELEASES_API_URL")
+                .unwrap_or_else(|_| release::DEFAULT_RELEASES_API.to_owned());
+            let channel = match o.channel {
+                ChannelArg::Alpha => release::Channel::Alpha,
+                ChannelArg::Stable => release::Channel::Stable,
+            };
+            let tag = release::resolve_tag(&api, channel)?;
+            println!("Newest {} release: {tag}", channel.text());
+            tag
+        }
+    };
+    let current = env!("CARGO_PKG_VERSION");
+    if tag.trim_start_matches('v') == current {
+        println!("Already up to date: vesica {current} ({tag})");
+        return Ok(());
+    }
+    let target = match &o.target {
+        Some(target) => target.clone(),
+        None => std::env::current_exe().context("cannot determine the running executable")?,
+    };
+    let parent = target
+        .parent()
+        .context("target has no parent directory")?
+        .to_path_buf();
+    let base_url = std::env::var("VESICA_RELEASE_BASE_URL")
+        .unwrap_or_else(|_| release::DEFAULT_BASE_URL.to_owned());
+    let staging = parent.join(format!(
+        ".vesica-update-{}",
+        utc_stamp(std::time::SystemTime::now())
+    ));
+    std::fs::create_dir_all(&staging).with_context(|| format!("creating {}", staging.display()))?;
+    let outcome = (|| -> Result<()> {
+        let tarball = release::download(&staging, &base_url, &tag)?;
+        release::verify_checksum(&staging, &tarball)?;
+        let binary = release::extract(&staging, &tarball, &tag)?;
+        release::check_reports_version(&binary, &tag)?;
+        if o.dry_run {
+            println!(
+                "Would replace {} (vesica {})",
+                target.display(),
+                tag.trim_start_matches('v')
+            );
+            return Ok(());
+        }
+        release::replace(&target, &binary)?;
+        println!(
+            "Replaced {} (vesica {})",
+            target.display(),
+            tag.trim_start_matches('v')
+        );
+        Ok(())
+    })();
+    // Always remove the staging directory, on success and on every failure path.
+    let cleanup = std::fs::remove_dir_all(&staging);
+    outcome?;
+    cleanup.with_context(|| format!("removing {}", staging.display()))?;
+    if o.dry_run {
+        return Ok(());
+    }
+    relink_from_manifest(&o)
+}
+
+/// Re-run the install plan from what the manifest recorded, so links follow the new binary.
+fn relink_from_manifest(o: &UpdateOptions) -> Result<()> {
+    let cfg = root(o.root.as_deref())?.join(".config/agent-home");
+    let manifest_path = cfg.join("manifest.json");
+    if !manifest_path.is_file() {
+        println!(
+            "No manifest recorded at {}; skipping re-link",
+            manifest_path.display()
+        );
+        return Ok(());
+    }
+    let manifest = ah_core::Manifest::load(&manifest_path)?;
+    if manifest.shared_home.is_empty() {
+        println!("Manifest records no shared home; skipping re-link");
+        return Ok(());
+    }
+    let profile = match manifest.profile.as_str() {
+        "core" => Some(ProfileArg::Core),
+        "lead" => Some(ProfileArg::Lead),
+        _ => Some(ProfileArg::Developer),
+    };
+    println!(
+        "Re-linking from the recorded manifest ({})",
+        manifest.shared_home
+    );
+    install(InstallOptions {
+        options: Options {
+            home_repo: PathBuf::from(&manifest.shared_home),
+            profile,
+        },
+        root: o.root.clone(),
+        dry_run: false,
+        repos_dir: o.repos_dir.clone(),
+        vault: manifest.vault.as_ref().map(PathBuf::from),
+    })
 }
 
 fn utc_date() -> String {
@@ -877,6 +1018,7 @@ fn install(o: InstallOptions) -> Result<()> {
             let previous = m.clone();
             m.shared_home = o.options.home_repo.to_string_lossy().into_owned();
             m.profile = selected.into();
+            m.vault = vault.as_ref().map(|v| v.to_string_lossy().into_owned());
             for (a, r) in plan.actions.iter().zip(outcomes) {
                 if matches!(
                     r,
