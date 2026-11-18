@@ -67,6 +67,10 @@ fn agent_home_schema_matches_parser() {
         ),
         (repo(ok_repo), true),
         (repo(&format!("{ok_repo}\nprofiles = []")), true),
+        (repo(&format!("{ok_repo}\nstandards = true")), true),
+        (repo(&format!("{ok_repo}\nstandards = false")), true),
+        (repo(&format!("{ok_repo}\nstandards = \"yes\"")), false),
+        (repo(&format!("{ok_repo}\nstandards = 1")), false),
         (repo(&format!("{ok_repo}\nprofiles = [\"lead\"]")), true),
         (
             repo("name = \"a_b.c-d\"\nurl = \"git@example.invalid:o/a.git\""),

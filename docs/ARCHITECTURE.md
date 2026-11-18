@@ -11,6 +11,8 @@ vesica CLI
   ├─ update   resolve a release (or --tag), curl the tarball + SHA256SUMS, verify the SHA-256 and
   │           that the binary reports the tag's version, rename it into place, re-link from the
   │           recorded manifest; staging is always removed and failures leave the binary alone
+  ├─ sync-standards  --dry-run plans Standards/* -> <repo>/.github/instructions/*.instructions.md
+  │                  for repos with `standards = true`; writes nothing
   ├─ new-skill scaffold Agents/Skills/<name>/SKILL.md on a new skill/<name> branch (committed,
   │           never pushed); refuses a dirty checkout, an existing skill or branch, unsafe names
   ├─ status   read the install manifest and report recorded entries
@@ -54,6 +56,8 @@ shared-home checkout
 - repository name and URL safety, and no `core` in a repository's `profiles`;
 - the recursive credential-key ban;
 - unknown keys allowed, as the parser ignores them.
+
+`repos[].standards` (boolean, default `false`) is the per-repo opt-in for `vesica sync-standards` (decision D-I).
 
 The TOML schema validates the document after conversion to JSON (for example with Taplo's `#:schema` directive). `crates/ah-core/tests/schema_parity.rs` is the contract: every corpus case must get the same verdict from `AgentHomeConfig::parse`/`FoundryCatalog::parse` and from the schema (validated with `boon`, a dev-only dependency). A rule changed in one place and not the other fails CI.
 

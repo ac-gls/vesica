@@ -27,6 +27,8 @@ enum Command {
     Update(UpdateOptions),
     /// Scaffold a skill on a branch in the shared home
     NewSkill(NewSkillOptions),
+    /// Plan copying Standards/* into opted-in code repositories
+    SyncStandards(SyncStandardsOptions),
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ProfileArg {
@@ -119,6 +121,22 @@ struct TeamOptions {
 enum TeamCommand {
     Status(TeamStatusOptions),
     Pull(TeamPullOptions),
+}
+#[derive(Debug, clap::Args)]
+struct SyncStandardsOptions {
+    #[command(flatten)]
+    options: Options,
+    #[arg(
+        long,
+        env = "VESICA_REPOS_DIR",
+        help = "Directory holding the code-repo checkouts"
+    )]
+    repos_dir: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Plan the sync without writing (the only implemented mode)"
+    )]
+    dry_run: bool,
 }
 #[derive(Debug, clap::Args)]
 struct NewSkillOptions {
@@ -251,6 +269,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Vault(o) => vault(o.command),
         Command::Update(o) => update(o),
         Command::NewSkill(o) => new_skill(o),
+        Command::SyncStandards(o) => sync_standards(o),
         Command::Team(o) => match o.command {
             TeamCommand::Status(options) => team_status(&required_team_path(options.path)?),
             TeamCommand::Pull(options) => team_pull(&required_team_path(options.path)?),
@@ -523,6 +542,88 @@ fn new_skill(o: NewSkillOptions) -> Result<()> {
             "Note: the scaffold carries a TODO description; replace it before opening the PR."
         );
     }
+    Ok(())
+}
+
+/// `vesica sync-standards --dry-run` (plan §5.4, decision D-I). The opt-in is
+/// `standards = true` on a `[[repos]]` entry. Only the plan is produced: opening the PRs needs
+/// separate approval, so anything but `--dry-run` refuses.
+fn sync_standards(o: SyncStandardsOptions) -> Result<()> {
+    let (c, _) = load(&o.options)?;
+    let shared = o.options.home_repo.canonicalize().with_context(|| {
+        format!(
+            "shared-home path does not exist: {}",
+            o.options.home_repo.display()
+        )
+    })?;
+    let repos_dir = o.repos_dir.as_ref().context(
+        "sync-standards needs --repos-dir <dir>: the directory holding the code-repo checkouts",
+    )?;
+    if !o.dry_run {
+        anyhow::bail!(
+            "opening a PR per repository needs separate approval; run `vesica sync-standards --dry-run`"
+        );
+    }
+    if !repos_dir.is_dir() {
+        anyhow::bail!("repos directory does not exist: {}", repos_dir.display());
+    }
+    let standards = ah_vault::standards(&shared)?;
+    if standards.is_empty() {
+        println!("No Standards/*.md files in {}", shared.display());
+        return Ok(());
+    }
+    let mut planned = 0_usize;
+    let mut opted_in = 0_usize;
+    let mut unchanged = 0_usize;
+    for repo in &c.repos {
+        if !repo.standards {
+            println!(
+                "{}: not opted in (set `standards = true` in agent-home.toml)",
+                repo.name
+            );
+            continue;
+        }
+        let checkout = repos_dir.join(&repo.name);
+        if !checkout.is_dir() {
+            println!("{}: not cloned at {}", repo.name, checkout.display());
+            continue;
+        }
+        opted_in += 1;
+        println!("{}: plan for {}", repo.name, checkout.display());
+        for standard in &standards {
+            let destination = checkout
+                .join(".github/instructions")
+                .join(format!("{}.instructions.md", standard.name));
+            let relative = destination
+                .strip_prefix(&checkout)
+                .unwrap_or(&destination)
+                .display()
+                .to_string();
+            let state = match std::fs::read(&destination) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    planned += 1;
+                    "Would create"
+                }
+                Ok(existing) if existing == standard.bytes => {
+                    unchanged += 1;
+                    "unchanged"
+                }
+                Ok(_) => {
+                    planned += 1;
+                    "Would update"
+                }
+                Err(error) => return Err(error.into()),
+            };
+            println!("  {state}: {relative} -> {}", destination.display());
+        }
+    }
+    if opted_in == 0 {
+        println!("No repository is opted in (`standards = true` in agent-home.toml).");
+        return Ok(());
+    }
+    println!(
+        "Dry run: {planned} file(s) would change, {unchanged} already match; nothing was written."
+    );
     Ok(())
 }
 

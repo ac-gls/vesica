@@ -2,3 +2,5 @@
 *.swp
 .DS_Store
 /dist
+# Written by tests/lifecycle-linux.sh when VESICA_EVIDENCE is unset.
+/lifecycle-evidence.md

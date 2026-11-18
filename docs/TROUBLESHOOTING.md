@@ -81,6 +81,17 @@ Findings print `path:line:rule: message` and never the offending text.
 | VSH014 | The skill's `name` doesn't match its folder name. |
 | VSH015 | The skill's `description` is missing or blank. |
 
+## `vesica sync-standards`
+
+| Message | Meaning / fix |
+|---|---|
+| `opening a PR per repository needs separate approval; run … --dry-run` | Only the plan is implemented. Real PR creation stays gated. |
+| `sync-standards needs --repos-dir <dir>` | Pass the directory that holds the code-repo checkouts (or set `VESICA_REPOS_DIR`). |
+| `<repo>: not opted in (set standards = true in agent-home.toml)` | Add `standards = true` to that repo's `[[repos]]` entry in the shared home. |
+| `<repo>: not cloned at <path>` | Clone it first (`vesica install --repos-dir <dir>`). Nothing was planned for it. |
+| `No repository is opted in …` | No repo in the shared config sets `standards = true`. |
+| `No Standards/*.md files in …` | The shared home has no `Standards/` content to sync. |
+
 ## `vesica new-skill`
 
 | Message | Fix |
