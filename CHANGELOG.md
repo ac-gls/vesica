@@ -13,6 +13,13 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 - `agent-home.toml` repository entries are validated: the name must be a single safe directory name, and option-like URLs and `ext::`/`fd::` URLs are rejected.
 - **Breaking (config):** the `core` profile has no repositories (plan §3). A repo whose `profiles` includes `core` is rejected. An empty `profiles` list now means developer and lead; previously it also included core.
 
+- Content-free guard `scripts/content-guard.sh` and the `content-guard` CI job (plan §5.5 / B8), with tests that seed each violation.
+- `supply-chain` CI job: `cargo deny --locked check` and `cargo audit --deny warnings`. The licence allow-list is trimmed to the licences actually in use.
+
+### Removed
+- `chrono` (RUSTSEC-2026-0543, unmaintained). Backup timestamps now use a small tested UTC formatter.
+- `serde_yaml` (deprecated) and its `unsafe-libyaml` dependency (RUSTSEC-2024-0449, unmaintained). Frontmatter lint uses `yaml-rust2`, with characterization tests pinning the previous semantics. The dependency graph went from 121 to 94 crates.
+
 ### Fixed
 - TOML merge (`ah-config`) no longer drops comments when it replaces an existing value. The key's leading comment (including a file-header comment on the first key) and the value's inline comment are kept. It's covered by exact-byte and `insta` snapshot tests on realistic Codex/OpenCode configs.
 - `uninstall` now restores a managed file byte-for-byte when the original had no final newline (previously it safely refused and left the block in place). Restoration is proven by re-applying the install transform to the verified backup and comparing against the current bytes.

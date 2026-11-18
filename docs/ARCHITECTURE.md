@@ -41,8 +41,10 @@ The CLI preflights unsafe state paths. Installer mutations, backup creation, and
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo build -p vesica`
 - `VESICA_TEST_TMP_ROOT=/mnt/wsl-home bash tests/install.sh`
-- `shellcheck install.sh tests/install.sh`
+- `shellcheck install.sh tests/install.sh tests/lifecycle-linux.sh scripts/content-guard.sh tests/content-guard.sh`
 - `git diff --check`
+- `bash scripts/content-guard.sh` and `bash tests/content-guard.sh`: the content-free guard (plan §5.5). It flags org names/domains (VCG001), non-placeholder GUIDs (VCG002), internal/Azure resource hostnames (VCG003), `SKILL.md`/`AGENTS.md` outside `tests/fixtures/` (VCG004) and gitleaks findings over the full history (VCG005). Findings report rule, file and line only. CI pins gitleaks 8.30.1 by SHA-256.
+- `cargo deny --locked check` and `cargo audit --deny warnings`: licences (minimal allow-list), bans, sources and RustSec advisories, including unmaintained crates.
 
 These are Linux/WSL development-container results. Installer fixtures simulate Linux and non-Linux host identity and use a local tarball; they do not establish a real native-Linux distribution matrix, real profile install, or signed-release validation. Windows interoperability is optional and unvalidated. The transaction cannot guarantee success if the OS refuses rollback or a user replaces files concurrently; it avoids clobbering changed content and reports remaining errors. Vesica remains a prototype, not pilot/production-ready.
 

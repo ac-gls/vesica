@@ -530,19 +530,21 @@ fn lint_frontmatter(path: &std::path::Path, text: &str) -> Vec<LintFinding> {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let value: serde_yaml::Value = match serde_yaml::from_str(&parse_yaml) {
-        Ok(value) => value,
+    use yaml_rust2::Yaml;
+    let value = match yaml_rust2::YamlLoader::load_from_str(&parse_yaml) {
+        Ok(documents) => documents.into_iter().next().unwrap_or(Yaml::Null),
         Err(error) => {
             findings.push(LintFinding {
                 path: path.to_path_buf(),
-                line: error.location().map(|loc| loc.line() + 1).unwrap_or(2),
+                // Marker lines are 1-based within the frontmatter; the file adds the `---` line.
+                line: error.marker().line() + 1,
                 rule: "VSH008",
                 message: "YAML frontmatter is invalid",
             });
             return findings;
         }
     };
-    let Some(mapping) = value.as_mapping() else {
+    let Yaml::Hash(mapping) = &value else {
         findings.push(LintFinding {
             path: path.to_path_buf(),
             line: 2,
@@ -551,7 +553,7 @@ fn lint_frontmatter(path: &std::path::Path, text: &str) -> Vec<LintFinding> {
         });
         return findings;
     };
-    let field = |name: &str| mapping.get(serde_yaml::Value::String(name.to_owned()));
+    let field = |name: &str| mapping.get(&Yaml::String(name.to_owned()));
     let is_template = path
         .components()
         .next()
@@ -574,7 +576,7 @@ fn lint_frontmatter(path: &std::path::Path, text: &str) -> Vec<LintFinding> {
             "title" | "created" | "updated" | "type" | "area" | "owner" | "authority" => {
                 value.is_some_and(|v| v.as_str().is_some_and(|s| !s.trim().is_empty()))
             }
-            "tags" => value.is_some_and(serde_yaml::Value::is_sequence),
+            "tags" => value.is_some_and(|v| matches!(v, Yaml::Array(_))),
             _ => true,
         };
         if !valid_shape {
@@ -590,7 +592,7 @@ fn lint_frontmatter(path: &std::path::Path, text: &str) -> Vec<LintFinding> {
     if is_template {
         return findings;
     }
-    if let Some(authority) = field("authority").and_then(serde_yaml::Value::as_str) {
+    if let Some(authority) = field("authority").and_then(Yaml::as_str) {
         if !matches!(authority, "working" | "mirror" | "digest") {
             findings.push(LintFinding {
                 path: path.to_path_buf(),
@@ -599,7 +601,7 @@ fn lint_frontmatter(path: &std::path::Path, text: &str) -> Vec<LintFinding> {
                 message: "frontmatter authority must be working, mirror, or digest",
             });
         } else if matches!(authority, "mirror" | "digest")
-            && field("source").is_none_or(serde_yaml::Value::is_null)
+            && field("source").is_none_or(Yaml::is_null)
         {
             findings.push(LintFinding {
                 path: path.to_path_buf(),
