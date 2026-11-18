@@ -57,6 +57,7 @@ These are Linux/WSL development-container results. Installer fixtures simulate L
 
 ## Known limitations
 
+- `bash tests/lifecycle-linux.sh` (CI job `lifecycle`) exercises the real binary through bootstrap → doctor → dry-run → install → repeat install → refusal cases → uninstall, plus personal-vault/shared-home Git isolation and `team status/pull`, in a disposable HOME. In CI it runs on GitHub-hosted Ubuntu VMs with `VESICA_REQUIRE_NATIVE=1`; local WSL/container runs are labelled supplemental.
 - `bash tests/install.sh` builds a disposable fixture release and checks Linux host/architecture gating, bootstrap-only installation, preservation of spaced CLI arguments, and checksum rejection without side effects. It is network-free; CI runs it alongside ShellCheck. It does not establish the plan's complete install → doctor → idempotent reinstall parity acceptance.
 - Private-team cloning/bootstrap remains incomplete; rollback covers bounded installer action/manifest failure cases only.
 - Profile selection is recorded in the manifest; both `doctor` and `install` report the repositories assigned to the selected profile. Install does not clone or install those repositories yet, and currently links the shared skill set for all profiles. Repository entries in the install output are informational only.

@@ -472,6 +472,20 @@ fn install(o: InstallOptions) -> Result<()> {
                     result.insert(action.key().to_owned(), PathBuf::from(path));
                     continue;
                 }
+                // Vesica created this target (its original state was "absent"), and it is still
+                // exactly what Vesica wrote: a fresh backup would only be an unrecorded orphan.
+                if let Some(installed) = existing.installed_sha256.as_deref() {
+                    match std::fs::read(action.key()) {
+                        Ok(bytes) => {
+                            use sha2::Digest;
+                            if hex::encode(sha2::Sha256::digest(&bytes)) == installed {
+                                continue;
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
             }
             if matches!(action, ah_core::Action::UpsertBlock { .. }) {
                 let target = Path::new(action.key());
