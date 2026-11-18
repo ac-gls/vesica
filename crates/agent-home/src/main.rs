@@ -977,21 +977,18 @@ fn uninstall(r: Option<&Path>, dry: bool) -> Result<()> {
                     retained.insert(key, entry);
                     continue;
                 }
-                let cleaned = ah_config::block::remove(
-                    &current,
-                    ah_config::block::CommentStyle::Hash,
-                    "vesica",
-                );
-                let cleaned = if cleaned == original {
-                    cleaned
-                } else {
-                    ah_config::block::remove(
-                        &current,
-                        ah_config::block::CommentStyle::Hash,
-                        "agent-home",
-                    )
-                };
-                if cleaned != original {
+                // The file is exactly what install wrote (hash checked above). Restoring the
+                // verified backup is exact when re-applying the install transform to it
+                // reproduces the current bytes; this also covers originals without a final
+                // newline, which block removal alone cannot reconstruct. Stripping the block is
+                // kept as a fallback for older installs.
+                let style = ah_config::block::CommentStyle::Hash;
+                let restorable = ["vesica", "agent-home"].iter().any(|name| {
+                    ah_config::block::get(&current, style, name).is_some_and(|body| {
+                        ah_config::block::upsert(&original, style, name, &body) == current
+                    }) || ah_config::block::remove(&current, style, name) == original
+                });
+                if !restorable {
                     println!("Skipped block because stripping the managed region would not restore backup: {key}");
                     retained.insert(key, entry);
                     continue;

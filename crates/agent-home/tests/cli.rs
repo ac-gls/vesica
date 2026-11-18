@@ -1320,6 +1320,57 @@ fn uninstall_restores_legacy_agent_home_managed_blocks() {
 }
 
 #[test]
+fn uninstall_restores_awkward_user_files_byte_for_byte() {
+    // B2 acceptance: uninstall restores files byte-identical to the originals, including CRLF
+    // line endings, a missing final newline, tabs, trailing spaces and non-ASCII text.
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    let originals: [(&str, &[u8]); 2] = [
+        (
+            ".claude/CLAUDE.md",
+            b"# R\xc3\xa8gles\r\n\tindented  \r\n\r\nlast line, no newline",
+        ),
+        (
+            ".codex/AGENTS.md",
+            b"line one   \nline two\twith tab\n\n\n\xe2\x9c\x93 done",
+        ),
+    ];
+    for (path, bytes) in originals {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .arg("--root")
+        .arg(&root)
+        .assert()
+        .success();
+    for (path, bytes) in originals {
+        assert_ne!(
+            std::fs::read(root.join(path)).unwrap(),
+            bytes,
+            "{path} was wired"
+        );
+    }
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .assert()
+        .success();
+    for (path, bytes) in originals {
+        assert_eq!(
+            std::fs::read(root.join(path)).unwrap(),
+            bytes,
+            "{path} must be restored byte-for-byte"
+        );
+    }
+}
+
+#[test]
 fn uninstall_restores_backed_up_user_content_if_nothing_changed() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("home");
