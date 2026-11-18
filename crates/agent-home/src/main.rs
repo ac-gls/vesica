@@ -938,7 +938,16 @@ fn doctor(o: &DoctorOptions) -> Result<()> {
     let wsl_status = if wsl { "detected" } else { "not detected" };
     let selected = prof(&o.options, &c);
     let selected_profile = ah_agents::ProfileSelection::from_name(&c, selected)?;
-    let checks = preflight::Preflight::run(c.minimum.node.as_deref());
+    let mut checks = preflight::Preflight::run(c.minimum.node.as_deref());
+    // Informational, never a blocker: install works without a Git identity, but the personal-vault
+    // commit paths (`vault snapshot`, `new-skill`, `share`) need one.
+    checks.optional.push((
+        "git identity",
+        match git_author_name(&o.options.home_repo) {
+            Ok(name) => format!("found: {name}"),
+            Err(_) => "missing (needed by vault snapshot, new-skill and share)".to_owned(),
+        },
+    ));
     let status = if checks.ok() { "ok" } else { "blocked" };
     if o.json {
         let required: serde_json::Map<_, _> = checks

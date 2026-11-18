@@ -118,6 +118,15 @@ Findings print `path:line:rule: message` and never the offending text.
 | `git commit failed: Author identity unknown` | `new-skill` commits with **your** Git identity. Set `git config --global user.name` and `user.email`. |
 | `… is not a shared home (no Agents/ directory)` | `--home-repo` must point at a shared-home checkout. |
 
+## `vesica doctor`
+
+Beyond the blocker rows above:
+
+| Output | Meaning |
+|---|---|
+| `Optional git identity: found: <name>` | Commits from `vault snapshot`, `new-skill` and `share` will be attributed to that identity. |
+| `Optional git identity: missing (needed by vault snapshot, new-skill and share)` | Install still works. Set `git config --global user.name` and `user.email` before using the commit-writing commands, or they fail with Git's "Author identity unknown". |
+
 ## `vesica update`
 
 | Message | Meaning / fix |
