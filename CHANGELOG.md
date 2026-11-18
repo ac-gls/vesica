@@ -9,6 +9,8 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 - Installer tests verify platform gating with a fake `uname` and fail clearly on a `noexec` temp directory.
 
 - `vesica doctor` runs a Linux preflight: platform/distro/kernel, required `git`/`gh`/`curl`/`sha256sum` (missing = blocker, non-zero exit), optional `az` and `node` against `minimum.node`. JSON adds `status`, `blockers`, `platform` and `prerequisites`.
+- `vesica install --repos-dir <dir>` clones missing repositories for the `developer`/`lead` profiles (plan step 10). It's opt-in, never touches an existing destination, stages each clone in a temporary directory, has no Git prompts or `ext`/`fd` transports, and leaves repos in place on `uninstall`.
+- `agent-home.toml` repository entries are validated: the name must be a single safe directory name, and option-like URLs and `ext::`/`fd::` URLs are rejected.
 
 ### Fixed
 - Repeat `install` no longer writes a new, unrecorded backup of a Vesica-created managed file (e.g. `~/.codex/AGENTS.md`) on every run.

@@ -1,4 +1,5 @@
 mod preflight;
+mod repos;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -62,6 +63,12 @@ struct InstallOptions {
     root: Option<PathBuf>,
     #[arg(long)]
     dry_run: bool,
+    #[arg(
+        long,
+        env = "VESICA_REPOS_DIR",
+        help = "Clone missing profile repositories into this directory (developer/lead profiles)"
+    )]
+    repos_dir: Option<PathBuf>,
 }
 #[derive(Debug, clap::Args)]
 struct VaultScanOptions {
@@ -391,6 +398,18 @@ fn install(o: InstallOptions) -> Result<()> {
             selected_repos.join(", ")
         }
     );
+    // Install step 10: plan repository clones read-only, before any mutation, so an unusable
+    // repos directory fails closed.
+    let repo_plan = match (&profile.profile, &o.repos_dir) {
+        (ah_core::Profile::Core, _) => Err(
+            "Repository cloning skipped: the core profile does not clone repositories".to_owned(),
+        ),
+        (_, None) => Err(format!(
+            "Repository cloning skipped: pass --repos-dir <dir> to clone {} eligible repositories",
+            profile.repositories.len()
+        )),
+        (_, Some(dir)) => Ok((dir.clone(), repos::plan(&profile.repositories, dir)?)),
+    };
     // Refuse unsafe state paths before creating backups or executing any action.
     if !o.dry_run {
         let metadata = match std::fs::symlink_metadata(&cfg) {
@@ -615,11 +634,56 @@ fn install(o: InstallOptions) -> Result<()> {
         println!("{r:?}: {}", a.key())
     }
     if o.dry_run {
+        match &repo_plan {
+            Err(message) => println!("{message}"),
+            Ok((_, steps)) => {
+                for step in steps {
+                    match &step.state {
+                        repos::RepoState::Clone => println!(
+                            "Would clone: {} -> {}",
+                            step.name,
+                            step.destination.display()
+                        ),
+                        repos::RepoState::Present => println!("Present: {}", step.name),
+                        repos::RepoState::Skipped(reason) => {
+                            println!("Skipped: {} ({reason}; left untouched)", step.name)
+                        }
+                    }
+                }
+            }
+        }
         return Ok(());
     }
     println!("Manifest recorded: {}", cfg.join("manifest.json").display());
-    println!("Repository cloning is not implemented; listed repositories are informational only.");
+    let mut clone_failures = Vec::new();
+    match &repo_plan {
+        Err(message) => println!("{message}"),
+        Ok((dir, steps)) => {
+            for step in steps {
+                match &step.state {
+                    repos::RepoState::Clone => match repos::clone(step, dir) {
+                        Ok(()) => {
+                            println!("Cloned: {} -> {}", step.name, step.destination.display())
+                        }
+                        Err(error) => {
+                            clone_failures.push(format!("failed to clone {}: {error:#}", step.name))
+                        }
+                    },
+                    repos::RepoState::Present => println!("Present: {}", step.name),
+                    repos::RepoState::Skipped(reason) => {
+                        println!("Skipped: {} ({reason}; left untouched)", step.name)
+                    }
+                }
+            }
+        }
+    }
     println!("Partial wiring: Claude and Codex only; other harnesses are not yet wired.");
+    if !clone_failures.is_empty() {
+        anyhow::bail!(
+            "{}; managed configuration was installed, rerun install to retry",
+            clone_failures.join("; ")
+        );
+    }
     Ok(())
 }
 fn create_install_backups(pending: &[(PathBuf, Vec<u8>)]) -> Result<Vec<PathBuf>> {
