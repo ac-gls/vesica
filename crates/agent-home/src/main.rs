@@ -1,3 +1,5 @@
+mod preflight;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
@@ -234,8 +236,29 @@ fn doctor(o: &DoctorOptions) -> Result<()> {
     let wsl_status = if wsl { "detected" } else { "not detected" };
     let selected = prof(&o.options, &c);
     let selected_profile = ah_agents::ProfileSelection::from_name(&c, selected)?;
+    let checks = preflight::Preflight::run(c.minimum.node.as_deref());
+    let status = if checks.ok() { "ok" } else { "blocked" };
     if o.json {
+        let required: serde_json::Map<_, _> = checks
+            .required
+            .iter()
+            .map(|(name, state)| ((*name).to_owned(), serde_json::json!(state)))
+            .collect();
+        let optional: serde_json::Map<_, _> = checks
+            .optional
+            .iter()
+            .map(|(name, state)| ((*name).to_owned(), serde_json::json!(state)))
+            .collect();
         let report = serde_json::json!({
+            "status": status,
+            "blockers": checks.blockers,
+            "platform": {
+                "os": checks.platform.os,
+                "arch": checks.platform.arch,
+                "kernel": checks.platform.kernel,
+                "distro": checks.platform.distro,
+            },
+            "prerequisites": {"required": required, "optional": optional},
             "shared_home": "valid",
             "team": {"name": c.team.name, "org": c.team.org},
             "profile": selected,
@@ -263,8 +286,32 @@ Repos for profile: {}\nFoundry deployments: {}",
             selected_profile.repositories.len(),
             f.deployments.len()
         );
-        println!("WSL kernel: {wsl_status}");
+        println!(
+            "Platform: {} {} ({}, kernel {})",
+            checks.platform.os,
+            checks.platform.arch,
+            checks.platform.distro,
+            checks.platform.kernel
+        );
+        for (name, state) in &checks.required {
+            println!("Required {name}: {state}");
+        }
+        for (name, state) in &checks.optional {
+            println!("Optional {name}: {state}");
+        }
+        println!("WSL kernel: {wsl_status} (informational; native Linux is supported)");
         println!("Live harness, Foundry, Windows and Herdr checks are not implemented.");
+        for blocker in &checks.blockers {
+            println!("Blocker: {blocker}");
+        }
+        println!("Doctor status: {status}");
+    }
+    if !checks.ok() {
+        anyhow::bail!(
+            "doctor found {} blocker(s): {}",
+            checks.blockers.len(),
+            checks.blockers.join("; ")
+        );
     }
     Ok(())
 }

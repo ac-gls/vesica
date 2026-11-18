@@ -529,6 +529,102 @@ fn doctor_reports_kernel_detection_and_explicit_override() {
         .stdout(predicate::str::contains("WSL kernel: detected"));
 }
 
+/// A PATH containing only executable stubs for the named tools (plus optional `node` output).
+fn stub_path(tools: &[&str], node_version: Option<&str>) -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name: &str, body: &str| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    for tool in tools {
+        write(tool, "exit 0");
+    }
+    if let Some(version) = node_version {
+        write("node", &format!("echo {version}"));
+    }
+    // A non-executable file must not count as an installed tool.
+    std::fs::write(dir.path().join("az"), "not executable").unwrap();
+    dir
+}
+
+fn doctor_json_with_path(path: &std::path::Path) -> (bool, serde_json::Value) {
+    let output = Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["doctor", "--json", "--home-repo"])
+        .arg(fixture_home())
+        .env("PATH", path)
+        .output()
+        .unwrap();
+    let report = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "doctor did not print JSON ({error}): {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    (output.status.success(), report)
+}
+
+#[test]
+fn doctor_reports_linux_platform_and_required_prerequisites() {
+    let path = stub_path(&["git", "gh", "curl", "sha256sum"], None);
+    let (ok, report) = doctor_json_with_path(path.path());
+    assert!(ok, "all required tools present: {report:#}");
+    assert_eq!(report["status"], "ok");
+    assert_eq!(report["platform"]["os"], "linux");
+    assert_eq!(report["platform"]["arch"], "x86_64");
+    assert!(report["platform"]["kernel"].as_str().is_some());
+    for tool in ["git", "gh", "curl", "sha256sum"] {
+        assert_eq!(report["prerequisites"]["required"][tool], "found", "{tool}");
+    }
+    assert_eq!(report["prerequisites"]["optional"]["az"], "missing");
+    assert_eq!(report["prerequisites"]["optional"]["node"], "missing");
+    assert_eq!(report["blockers"], serde_json::json!([]));
+}
+
+#[test]
+fn doctor_fails_closed_when_a_required_prerequisite_is_missing() {
+    let path = stub_path(&["git", "curl", "sha256sum"], None);
+    let (ok, report) = doctor_json_with_path(path.path());
+    assert!(!ok, "missing gh must fail doctor");
+    assert_eq!(report["status"], "blocked");
+    assert_eq!(report["prerequisites"]["required"]["gh"], "missing");
+    assert_eq!(
+        report["blockers"],
+        serde_json::json!(["required command not found: gh"])
+    );
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["doctor", "--home-repo"])
+        .arg(fixture_home())
+        .env("PATH", path.path())
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(
+            "Blocker: required command not found: gh",
+        ));
+}
+
+#[test]
+fn doctor_reports_node_below_the_team_minimum_without_blocking() {
+    let path = stub_path(&["git", "gh", "curl", "sha256sum"], Some("v18.19.0"));
+    let (ok, report) = doctor_json_with_path(path.path());
+    assert!(ok, "node is optional: {report:#}");
+    assert_eq!(
+        report["prerequisites"]["optional"]["node"],
+        "too old: 18.19.0 < 22.0.0"
+    );
+
+    let path = stub_path(&["git", "gh", "curl", "sha256sum"], Some("v22.15.0"));
+    let (_, report) = doctor_json_with_path(path.path());
+    assert_eq!(
+        report["prerequisites"]["optional"]["node"],
+        "found: 22.15.0"
+    );
+}
+
 #[test]
 fn doctor_fails_for_a_missing_shared_home() {
     Command::cargo_bin("vesica")
