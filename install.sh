@@ -1,6 +1,6 @@
 #!/bin/sh
-# vesica bootstrap: download the pinned release binary, verify its sha256, install it to
-# ~/.local/bin, then hand over to `vesica install "$@"`. Everything else lives in the binary.
+# Linux bootstrap: download the pinned Linux x86_64 release binary, verify its sha256,
+# install it to ~/.local/bin, then hand over to `vesica install "$@"`. Everything else lives in the binary.
 #
 #   curl -fsSL https://raw.githubusercontent.com/ac-gls/vesica/v0.1.0/install.sh \
 #     | sh -s -- --home-repo <owner/repo> --profile developer
@@ -31,9 +31,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if [ "${VESICA_ALLOW_NON_WSL:-0}" != "1" ]; then
-  grep -qi microsoft /proc/version 2>/dev/null || die "this kit supports Windows + WSL Ubuntu only (set VESICA_ALLOW_NON_WSL=1 for CI)"
-fi
+[ "$(uname -s)" = "Linux" ] || die "only Linux hosts are supported"
 [ "$(uname -m)" = "x86_64" ] || die "only x86_64 is supported"
 need tar
 need sha256sum

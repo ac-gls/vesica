@@ -9,6 +9,7 @@ vesica CLI
   │           Claude/Codex instruction files; execute supported actions; save manifest
   ├─ status   read the install manifest and report recorded entries
   ├─ uninstall verify hashes/links, then remove or restore only managed entries
+  ├─ team status/pull  inspect local shared-home refs / guarded fast-forward pull
   ├─ lint     read-only shared-home checks with secret-safe diagnostics
   ├─ vault-scan recursively check bounded-size UTF-8 files for common secret patterns
 
@@ -24,7 +25,7 @@ shared-home checkout
 - `ah-core`: team/catalog parsing and validation, action planner/executor, manifest model.
 - `ah-agents`: deterministic discovery of skill directories containing `SKILL.md`.
 - `ah-vault`: bounded common-credential pattern scanner and read-only shared-home lint (area README coverage, size cap, local wikilinks, personal paths, heuristic email detection, policy-area frontmatter/ownership/source checks, secret-safe findings).
-- `ah-wsl`: WSL kernel detection and a CI override; no Windows interop installer steps yet.
+- `ah-wsl`: WSL kernel detection for informational doctor output; native Linux is supported, and Windows interop is not implemented.
 - `ah-herdr`: placeholder only; runtime client is not implemented.
 - `vesica`: currently wires the limited workflows listed above.
 
@@ -42,7 +43,7 @@ The CLI preflights unsafe state paths. Installer mutations, backup creation, and
 - `shellcheck install.sh tests/install.sh`
 - `git diff --check`
 
-These are local WSL/Linux results. Windows compilation/replacement behavior and actual Windows/WSL install acceptance remain unverified. The transaction cannot guarantee success if the OS refuses rollback or a user replaces files concurrently; it avoids clobbering changed content and reports remaining errors. Vesica remains a prototype, not pilot/production-ready.
+These are Linux/WSL development-container results. Installer fixtures simulate Linux and non-Linux host identity and use a local tarball; they do not establish a real native-Linux distribution matrix, real profile install, or signed-release validation. Windows interoperability is optional and unvalidated. The transaction cannot guarantee success if the OS refuses rollback or a user replaces files concurrently; it avoids clobbering changed content and reports remaining errors. Vesica remains a prototype, not pilot/production-ready.
 
 1. The shared-home repository holds team content; the installer repository does not.
 2. Config/catalog parsing rejects credential-like keys.
@@ -56,13 +57,13 @@ These are local WSL/Linux results. Windows compilation/replacement behavior and 
 
 ## Known limitations
 
-- `bash tests/install.sh` builds a disposable fixture release and checks bootstrap-only installation, preservation of spaced CLI arguments, and checksum rejection without side effects. It is network-free; CI runs it alongside shellcheck. It does not establish the plan's complete install → doctor → idempotent reinstall parity acceptance.
+- `bash tests/install.sh` builds a disposable fixture release and checks Linux host/architecture gating, bootstrap-only installation, preservation of spaced CLI arguments, and checksum rejection without side effects. It is network-free; CI runs it alongside ShellCheck. It does not establish the plan's complete install → doctor → idempotent reinstall parity acceptance.
 - Private-team cloning/bootstrap remains incomplete; rollback covers bounded installer action/manifest failure cases only.
 - Profile selection is recorded in the manifest; both `doctor` and `install` report the repositories assigned to the selected profile. Install does not clone or install those repositories yet, and currently links the shared skill set for all profiles. Repository entries in the install output are informational only.
 - Claude/Codex and discovered skill links are the only harness wiring. OpenCode, Copilot, Hermes, role-agent rendering, Foundry, and Herdr are not wired.
 - WSL detection exists, but Windows profile discovery, drvfs/OneDrive validation, `winget`, Obsidian, scheduled tasks, and Windows-side operations do not.
 - Vault scan is a heuristic check for common patterns, not a complete DLP/secret detector; absence of findings is not proof that a vault is secret-free.
-- No signed release/update path or end-to-end Windows+WSL dogfood validation is implemented; rollback remains bounded to the tested action/manifest failure cases above.
+- No signed release/update path or native-Linux lifecycle/dogfood validation is implemented (Windows+WSL is optional); rollback remains bounded to the tested action/manifest failure cases above.
 
 ## Verification
 

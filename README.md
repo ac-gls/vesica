@@ -1,12 +1,8 @@
 # Vesica
 
-One installer that gives every developer on a team the same agent setup on **Windows + WSL Ubuntu**:
-team rules, shared skills, role agents, coding standards, repo pointers and model configuration for
-**Claude Code, OpenCode, Copilot CLI, Codex** and **Hermes**, plus a personal Obsidian vault that the agents
-use as shared memory.
+Vesica's target is a content-free installer/tool: team content lives in a separate shared GitHub repository, while each developer's personal vault stays private. Shared changes are intended to arrive by reviewable pull request. This is the target architecture, not the current implementation.
 
-`vesica` is content-free: it holds no team content. Your team's rules, skills and knowledge live in a
-separate (usually private) **shared home** repository that the installer clones into your vault at `Team/`.
+The current prototype supports a **Linux x86_64** bootstrap and local shared-home checkout workflows. It does not yet clone/bootstrap the shared repository, perform `vesica share`, create contribution branches or PRs, or install the full team setup shown in the architecture plan. Native Linux is required; Windows/WSL integration is optional and not a prerequisite.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ac-gls/vesica/v0.1.0/install.sh \

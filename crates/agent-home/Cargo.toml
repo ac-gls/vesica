@@ -1,6 +1,6 @@
 [package]
 name = "vesica"
-description = "Install, update and uninstall a team's shared agent setup (Claude Code, OpenCode, Copilot CLI, Codex, Hermes) on Windows + WSL."
+description = "Install, update and uninstall shared agent setup on Linux (Claude Code, OpenCode, Copilot CLI, Codex, Hermes)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

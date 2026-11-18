@@ -14,7 +14,6 @@ if [[ -n "${VESICA_TEST_TMP_ROOT:-}" ]]; then export TMPDIR="$VESICA_TEST_TMP_RO
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/vesica-test.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/home"
-export VESICA_ALLOW_NON_WSL=1
 export VESICA_BIN_DIR="$TMP/bin"
 mkdir -p "$HOME" "$TMP/release"
 
@@ -36,7 +35,27 @@ tar --mtime='@0' --owner=0 --group=0 --numeric-owner -C "$TMP/release" -czf "$TM
 )
 export VESICA_CALLS="$TMP/calls"
 
-# Bootstrap-only extracts a verified local tarball and installs its executable.
+# Verify platform detection independently of the host running this test.
+mkdir -p "$TMP/fake-bin"
+cat > "$TMP/fake-bin/uname" <<'UNAME'
+#!/bin/sh
+case "${1:-}" in
+  -s) printf '%s\n' "${VESICA_TEST_UNAME_S:-Linux}" ;;
+  -m) printf '%s\n' x86_64 ;;
+  *) exit 1 ;;
+esac
+UNAME
+chmod +x "$TMP/fake-bin/uname"
+# A noexec temp filesystem would silently fall through to the real uname and give a misleading result.
+[[ "$("$TMP/fake-bin/uname" -s 2>/dev/null)" == Linux ]] \
+  || fail "cannot execute test shims under $TMP (noexec temp dir?); set VESICA_TEST_TMP_ROOT to an exec-capable directory"
+if PATH="$TMP/fake-bin:$PATH" VESICA_TEST_UNAME_S=Darwin sh "$INSTALLER" --from-file "$TMP/release/vesica-v0.1.0-x86_64-linux.tar.gz" --bootstrap-only >"$TMP/out" 2>&1; then
+  fail "non-Linux host was accepted"
+fi
+grep -q 'only Linux hosts are supported' "$TMP/out" || fail "non-Linux rejection was not reported"
+
+# Native Linux bootstrap does not depend on the historical WSL-only override.
+unset VESICA_ALLOW_NON_WSL || true
 sh "$INSTALLER" --from-file "$TMP/release/vesica-v0.1.0-x86_64-linux.tar.gz" --bootstrap-only
 [[ -x "$VESICA_BIN_DIR/vesica" ]] || fail "binary was not installed"
 [[ ! -e "$VESICA_CALLS" ]] || fail "bootstrap-only unexpectedly invoked install"
@@ -63,4 +82,4 @@ if sh "$INSTALLER" --from-file "$TMP/release/vesica-v0.1.0-x86_64-linux.tar.gz" 
 fi
 [[ ! -e "$VESICA_BIN_DIR/vesica" ]] || fail "binary left behind after missing checksum entry"
 
-printf 'installer tests passed (bootstrap-only, argument forwarding, checksum rejection)\n'
+printf 'installer tests passed (Linux platform check, bootstrap-only, argument forwarding, checksum rejection)\n'
