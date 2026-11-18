@@ -273,10 +273,6 @@ role_prefix = "ex-"
 [profiles]
 default = "developer"
 [[repos]]
-name = "core-only"
-url = "https://github.com/example-org/core-only.git"
-profiles = ["core"]
-[[repos]]
 name = "dev-lead"
 url = "https://github.com/example-org/dev-lead.git"
 profiles = ["developer", "lead"]
@@ -289,7 +285,7 @@ profiles = []
     .unwrap();
 
     for (profile, expected) in [
-        ("core", vec!["core-only", "all-profiles"]),
+        ("core", Vec::<&str>::new()),
         ("developer", vec!["dev-lead", "all-profiles"]),
         ("lead", vec!["dev-lead", "all-profiles"]),
     ] {
@@ -308,9 +304,32 @@ profiles = []
         );
         let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(report["profile"], profile);
-        assert_eq!(report["repos_in_config"], 3);
+        assert_eq!(report["repos_in_config"], 2);
         assert_eq!(report["repos"], serde_json::json!(expected));
     }
+}
+
+#[test]
+fn config_rejects_repositories_assigned_to_the_core_profile() {
+    let temp = tempfile::tempdir().unwrap();
+    let toml = std::fs::read_to_string(fixture_home().join("agent-home.toml")).unwrap();
+    std::fs::write(
+        temp.path().join("agent-home.toml"),
+        toml.replace(
+            r#"profiles = ["developer", "lead"]"#,
+            r#"profiles = ["core", "lead"]"#,
+        ),
+    )
+    .unwrap();
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["doctor", "--home-repo"])
+        .arg(temp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "repository sample-app lists the core profile; the core profile has no repositories",
+        ));
 }
 
 #[test]
@@ -329,10 +348,6 @@ env_prefix = "EX"
 role_prefix = "ex-"
 [profiles]
 default = "developer"
-[[repos]]
-name = "core-only"
-url = "https://github.com/example-org/core-only.git"
-profiles = ["core"]
 [[repos]]
 name = "developer-only"
 url = "https://github.com/example-org/developer-only.git"
@@ -361,7 +376,7 @@ profiles = []
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "install plan (profile: core; eligible repositories: core-only, shared-repo)",
+            "install plan (profile: core; eligible repositories: none)",
         ))
         .stdout(predicate::str::contains(
             "Repository cloning skipped: the core profile does not clone repositories",
