@@ -1186,7 +1186,7 @@ fn install_writes_a_manifest_and_uninstalls_only_untouched_managed_files() {
         .arg(&root)
         .assert()
         .success()
-        .stdout(predicate::str::contains("Recorded entries: 7"));
+        .stdout(predicate::str::contains("Recorded entries: 9"));
 
     Command::cargo_bin("vesica")
         .unwrap()
@@ -1598,4 +1598,154 @@ fn uninstall_skips_a_user_modified_managed_file() {
         "human added a rule\n"
     );
     assert!(root.join(".config/agent-home/manifest.json").exists());
+}
+
+/// Source `<root>/.bashrc` in a clean, non-interactive bash and return the Vesica variables
+/// (`EX` is the fixture's `team.env_prefix`): HOME, PROFILE, REPOS, VAULT.
+fn sourced_env(root: &std::path::Path) -> Vec<String> {
+    let out = std::process::Command::new("bash")
+        .args(["--noprofile", "--norc", "-c"])
+        .arg(r#". "$1/.bashrc" && printf '%s\n' "${EX_HOME-unset}" "${EX_PROFILE-unset}" "${EX_REPOS-unset}" "${EX_VAULT-unset}""#)
+        .arg("bash")
+        .arg(root)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+fn vesica_install(root: &std::path::Path, extra: &[&str]) -> assert_cmd::assert::Assert {
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .arg("--root")
+        .arg(root)
+        .args(extra)
+        .assert()
+}
+
+#[test]
+fn install_writes_config_env_sourced_from_bashrc_and_uninstall_restores_it() {
+    // Install step 2 (plan §5.4): config.env with <PREFIX>_HOME and <PREFIX>_PROFILE, plus a
+    // ~/.bashrc managed block that sources it. The root contains a space and a single quote to
+    // exercise shell quoting end to end.
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("it's a home");
+    let bashrc: &[u8] = b"# user bashrc\nalias ll='ls -l'\nexport KEEP=1";
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join(".bashrc"), bashrc).unwrap();
+    let config_env = root.join(".config/agent-home/config.env");
+
+    vesica_install(&root, &["--profile", "lead"])
+        .success()
+        .stdout(predicate::str::contains(config_env.to_str().unwrap()))
+        .stdout(predicate::str::contains(
+            root.join(".bashrc").to_str().unwrap(),
+        ));
+    let shared = fixture_home().canonicalize().unwrap();
+    assert_eq!(
+        sourced_env(&root),
+        [shared.to_str().unwrap(), "lead", "unset", "unset"]
+    );
+    let written = std::fs::read_to_string(&config_env).unwrap();
+    assert!(written.starts_with("# >>> vesica >>>\n"), "{written}");
+
+    // Reinstalling changes nothing.
+    let before = (
+        std::fs::read(&config_env).unwrap(),
+        std::fs::read(root.join(".bashrc")).unwrap(),
+    );
+    vesica_install(&root, &["--profile", "lead"]).success();
+    assert_eq!(
+        before,
+        (
+            std::fs::read(&config_env).unwrap(),
+            std::fs::read(root.join(".bashrc")).unwrap()
+        )
+    );
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .assert()
+        .success();
+    assert_eq!(std::fs::read(root.join(".bashrc")).unwrap(), bashrc);
+    assert!(!config_env.exists(), "config.env must be removed");
+}
+
+#[test]
+fn install_creates_bashrc_when_absent_and_uninstall_removes_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    vesica_install(&root, &["--profile", "core"]).success();
+    assert_eq!(sourced_env(&root)[1..3], ["core", "unset"]);
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .assert()
+        .success();
+    assert!(!root.join(".bashrc").exists());
+    assert!(!root.join(".config/agent-home/config.env").exists());
+}
+
+#[test]
+fn install_exports_an_absolute_repos_dir_for_repository_profiles_only() {
+    let fixture = RepoFixture::new();
+    let home = fixture.temp.path().join("home");
+    // A relative --repos-dir is exported as an absolute path.
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .current_dir(fixture.temp.path())
+        .args(["install", "--home-repo"])
+        .arg(&fixture.shared)
+        .arg("--root")
+        .arg(&home)
+        .args(["--repos-dir", "repos", "--profile", "developer"])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .assert()
+        .success();
+    let env = sourced_env(&home);
+    assert_eq!(env[1], "developer");
+    assert_eq!(
+        std::fs::canonicalize(&env[2]).unwrap(),
+        fixture.repos.canonicalize().unwrap()
+    );
+    // The core profile never clones, so it gets no repos variable; the block is updated in place.
+    fixture.install(&["--profile", "core"]).success();
+    assert_eq!(sourced_env(&home)[1..3], ["core", "unset"]);
+}
+
+#[test]
+fn install_dry_run_plans_shell_environment_without_writing_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    vesica_install(&root, &["--dry-run"])
+        .success()
+        .stdout(predicate::str::contains("config.env"))
+        .stdout(predicate::str::contains(".bashrc"));
+    assert!(!root.join(".bashrc").exists());
+    assert!(!root.join(".config/agent-home/config.env").exists());
+}
+
+#[test]
+fn install_refuses_values_that_cannot_be_written_to_config_env() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("line\nbreak");
+    vesica_install(&root, &[])
+        .failure()
+        .stderr(predicate::str::contains("cannot be written to config.env"));
+    assert!(!root.exists(), "nothing may be created before the refusal");
 }

@@ -5,7 +5,11 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- Install step 2: `~/.config/agent-home/config.env` exports `<PREFIX>_HOME`, `<PREFIX>_PROFILE` and (developer/lead with `--repos-dir`) an absolute `<PREFIX>_REPOS`, single-quoted for POSIX shells. A managed block in `~/.bashrc` sources it. Both are managed blocks, so backups, modified-file refusal and byte-exact uninstall apply. Paths with line breaks, NUL or non-UTF-8 names are refused before any change. The S7 lifecycle checks the sourced values and the restore.
 - JSON schemas `schemas/agent-home.schema.json` and `schemas/foundry.catalog.schema.json` (draft 2020-12) for shared-home authors, editors and CI. `crates/ah-core/tests/schema_parity.rs` runs a shared corpus of valid and invalid documents through both the CLI parser and the schema, and requires both to agree.
+
+### Changed
+- `team.env_prefix` must not start with a digit (it names shell variables); the parser and `agent-home.schema.json` both enforce it.
 
 ### Fixed
 - `foundry.catalog.json` whose root is a JSON array was accepted (serde reads structs positionally from arrays, so `["<tenant>"]` set the tenant). The catalog root must now be an object.

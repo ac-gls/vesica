@@ -86,6 +86,14 @@ fn agent_home_schema_matches_parser() {
             config("").replace("env_prefix = \"T_1\"", "env_prefix = \"T-1\""),
             false,
         ),
+        (
+            config("").replace("env_prefix = \"T_1\"", "env_prefix = \"1T\""),
+            false,
+        ),
+        (
+            config("").replace("env_prefix = \"T_1\"", "env_prefix = \"_t\""),
+            true,
+        ),
         (config("").replace("org = \"o\"\n", ""), false),
         (config("").replace("\"developer\"", "\"admin\""), false),
         (config("[minimum]\nnode = 22\n"), false),
