@@ -27,6 +27,7 @@ if [[ -n "${VESICA_TEST_TMP_ROOT:-}" ]]; then export TMPDIR="$VESICA_TEST_TMP_RO
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/vesica-lifecycle.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/home"
+export VESICA_VERSION=v0.0.0-test  # test-only asset name; independent of the release default
 mkdir -p "$HOME"
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$TMP/gitconfig"
 git config --global user.name "Vesica Lifecycle"
@@ -91,18 +92,18 @@ snapshot "$TMP/shared" >"$TMP/shared.before"
 # ---------------------------------------------------------------- S7: bootstrap with the real binary
 mkdir -p "$TMP/release"
 cp "$BIN" "$TMP/release/vesica"
-tar --mtime='@0' --owner=0 --group=0 --numeric-owner -C "$TMP/release" -czf "$TMP/release/vesica-v0.1.0-x86_64-linux.tar.gz" vesica
-(cd "$TMP/release" && sha256sum vesica-v0.1.0-x86_64-linux.tar.gz >SHA256SUMS)
+tar --mtime='@0' --owner=0 --group=0 --numeric-owner -C "$TMP/release" -czf "$TMP/release/vesica-${VESICA_VERSION}-x86_64-linux.tar.gz" vesica
+(cd "$TMP/release" && sha256sum "vesica-${VESICA_VERSION}-x86_64-linux.tar.gz" >SHA256SUMS)
 export VESICA_BIN_DIR="$TMP/bin"
 H1="$TMP/h-bootstrap"
 check S7 "bootstrap verifies checksum, installs binary and runs install" \
-  sh "$ROOT/install.sh" --from-file "$TMP/release/vesica-v0.1.0-x86_64-linux.tar.gz" --home-repo "$TMP/shared" --root "$H1"
+  sh "$ROOT/install.sh" --from-file "$TMP/release/vesica-${VESICA_VERSION}-x86_64-linux.tar.gz" --home-repo "$TMP/shared" --root "$H1"
 check S7 "bootstrapped binary is byte-identical to the build" cmp -s "$BIN" "$VESICA_BIN_DIR/vesica"
 check S7 "bootstrap-driven install recorded a manifest" test -f "$H1/.config/agent-home/manifest.json"
-printf 'tampered\n' >>"$TMP/release/vesica-v0.1.0-x86_64-linux.tar.gz"
+printf 'tampered\n' >>"$TMP/release/vesica-${VESICA_VERSION}-x86_64-linux.tar.gz"
 rm -rf "$TMP/bin2"
 refuse S7 "bootstrap rejects a checksum mismatch" "checksum" \
-  env VESICA_BIN_DIR="$TMP/bin2" sh "$ROOT/install.sh" --from-file "$TMP/release/vesica-v0.1.0-x86_64-linux.tar.gz" --bootstrap-only
+  env VESICA_BIN_DIR="$TMP/bin2" sh "$ROOT/install.sh" --from-file "$TMP/release/vesica-${VESICA_VERSION}-x86_64-linux.tar.gz" --bootstrap-only
 check S7 "rejected bootstrap left no binary" test ! -e "$TMP/bin2/vesica"
 mkdir -p "$TMP/fake-bin"
 cat >"$TMP/fake-bin/uname" <<'UNAME'
