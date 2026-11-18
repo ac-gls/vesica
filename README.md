@@ -34,6 +34,7 @@ vesica uninstall --root "$TRIAL"
 | `install` | Links the shared home and its skills, adds managed import blocks to Claude Code and Codex instruction files, writes `~/.config/agent-home/config.env` (sourced from `~/.bashrc`), and (with `--repos-dir`) clones missing developer/lead repositories. Never overwrites; refuses on any unmanaged destination. |
 | `status` / `uninstall` | Reports, or removes and restores, only what Vesica can prove it created. Originals are restored byte-for-byte. |
 | `team status` / `team pull` | Local status of a shared-home checkout (no fetch); fast-forward-only pull that refuses dirty or divergent checkouts. The path comes from `--path` or `VESICA_TEAM_HOME`. |
+| `vault init` / `fix` / `check` / `new-note` / `snapshot` | Create or adopt a personal vault from the skeleton, check it against the vault contract, write ledger notes, and commit it to its own Git repository, never including `Team/`. |
 | `lint` / `vault-scan` | Read-only shared-home policy lint and a heuristic credential scan. Findings never echo content. |
 
 ## Docs

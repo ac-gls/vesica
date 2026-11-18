@@ -265,6 +265,21 @@ git -C "$UP" reset -q --hard HEAD~1 && git -C "$UP" push -q -f origin main
 HEAD2=$(git -C "$V/Team" rev-parse HEAD)
 refuse S8 "team pull refuses a remote rewind" "rewound" "$BIN" team pull --path "$V/Team"
 check S8 "rewind refusal kept local HEAD" test "$(git -C "$V/Team" rev-parse HEAD)" = "$HEAD2"
+# ---------------------------------------------------------------- B4a: vault primitives (D30 snapshot excludes Team/**)
+PV="$TMP/b4a/vault"
+check S8 "vault init creates the skeleton and a Git repository" sh -c '"$1" vault init --path "$2" >/dev/null && test -f "$2/AGENTS.md" && test -d "$2/Sessions/agent-runs" && test -d "$2/.git"' _ "$BIN" "$PV"
+git clone -q "$REMOTE" "$PV/Team"
+check S8 "vault check passes with a nested Team checkout" "$BIN" vault check --path "$PV"
+check S8 "vault new-note creates a contract-compliant ledger note" sh -c '"$1" vault new-note --path "$2" --task lifecycle --agent ci --date 2026-01-02 >/dev/null && "$1" vault check --path "$2" >/dev/null && test -f "$2/Sessions/agent-runs/2026-01-02_lifecycle_ci.md"' _ "$BIN" "$PV"
+printf -- '---\ntitle: Idea\ncreated: 2026-01-02\nupdated: 2026-01-02\ntype: note\narea: x\ntags: [a]\n---\nidea\n' >"$PV/Inbox/idea.md"
+TEAM_HEAD=$(git -C "$PV/Team" rev-parse HEAD); TEAM_STATUS=$(git -C "$PV/Team" status --porcelain)
+check S8 "vault snapshot commits personal notes" sh -c '"$1" vault snapshot --path "$2" | grep -q "^Snapshot " && git -C "$2" ls-files --error-unmatch Inbox/idea.md >/dev/null' _ "$BIN" "$PV"
+check S8 "vault snapshot never includes Team" sh -c 'test -z "$(git -C "$1" ls-files -- Team)" && test -z "$(git -C "$1" log --all --name-only --format= -- Team)"' _ "$PV"
+check S8 "vault snapshot left the Team checkout untouched" sh -c 'test "$(git -C "$1/Team" rev-parse HEAD)" = "$2" && test "$(git -C "$1/Team" status --porcelain)" = "$3"' _ "$PV" "$TEAM_HEAD" "$TEAM_STATUS"
+printf '' >"$PV/.gitignore"
+refuse S8 "vault snapshot refuses when Team is not excluded" "not excluded" "$BIN" vault snapshot --path "$PV"
+check S8 "vault fix restores the Team exclusion" sh -c '"$1" vault fix --path "$2" | grep -q "added /Team" && "$1" vault snapshot --path "$2" >/dev/null && test -z "$(git -C "$2" ls-files -- Team)"' _ "$BIN" "$PV"
+
 if command -v git-lfs >/dev/null 2>&1; then LFS="git-lfs present ($(git lfs version | cut -d' ' -f1)); LFS behavior not in the fixture contract yet — not tested"
 else LFS="git-lfs absent; LFS not in the fixture contract yet — not tested"; fi
 

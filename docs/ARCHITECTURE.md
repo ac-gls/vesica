@@ -13,6 +13,13 @@ vesica CLI
   ├─ team status/pull  inspect local shared-home refs / guarded fast-forward pull
   ├─ lint     read-only shared-home checks with secret-safe diagnostics
   ├─ vault-scan recursively check bounded-size UTF-8 files for common secret patterns
+  ├─ vault init/fix   create (empty dir only) or adopt (add missing, never overwrite) the
+  │                   embedded skeleton (assets/vault-skeleton); ensure /Team is ignored; git init
+  ├─ vault check      read-only contract check (VVC001 required entries, VVC002 Team excluded
+  │                   and untracked, VVC003 Git repo, VVC005/006 frontmatter and type)
+  ├─ vault new-note   ledger note from assets/templates/ledger-note.md; never overwrites
+  ├─ vault snapshot   commit with the person's Git identity; refuses unless Team is ignored and
+  │                   untracked, and if a file to be committed matches a secret pattern (D30)
 
 shared-home checkout
   ├─ AGENTS.md                         → ~/Team symlink

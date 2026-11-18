@@ -61,6 +61,19 @@ reported, and its manifest entry is retained so you can rerun after fixing it.
 
 Uninstall never deletes cloned repositories or your notes.
 
+## `vesica vault`
+
+| Message | Fix |
+|---|---|
+| `… already exists and is not empty; use vesica vault fix …` | `init` only creates new vaults. To adopt an existing folder (it only adds what's missing), use `vault fix`. |
+| `VVC001 <entry>: required vault entry is missing` | Run `vesica vault fix --path <vault>`. |
+| `VVC002 Team: Team is not excluded by .gitignore` | Add a line `/Team` (`Team/` alone misses a symlinked `Team`), or run `vault fix`. |
+| `VVC002 Team: Team is tracked by the vault repository` | Run `git rm -r --cached Team` in the vault, then commit. The shared home is its own repository. |
+| `VVC003 .: vault is not a Git repository` | Run `vault fix`, which runs `git init`. |
+| `VVC005` / `VVC006` frontmatter findings | Add `title, created, updated, type, area, tags` (tags as a list), and use an allowed `type` (see `AGENTS.md` in the vault). |
+| `refusing to snapshot: possible secrets in <file>:<line>` | Remove the credential from the note. Nothing was committed. |
+| `git commit failed: … Please tell me who you are` | Snapshots use your own Git identity. Set `git config --global user.name` and `user.email`. |
+
 ## `vesica team status` / `team pull`
 
 | Message | Fix |

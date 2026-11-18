@@ -5,6 +5,13 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- `vesica vault init|fix|check|new-note|snapshot` (plan §5.1, §5.6, D30). The personal-vault skeleton and the ledger-note template are embedded from `assets/`.
+  - `init` creates a vault in an absent or empty directory.
+  - `fix` adopts an existing folder: it adds only what's missing, never overwrites, and makes sure `/Team` is ignored.
+  - `check` is a read-only contract check: required entries, Git repository, Team excluded and untracked, and frontmatter with the allowed `type` values on every note outside `Team/`, `AGENTS.md` and `CLAUDE.md`. Findings report the rule, path and line, never note text.
+  - `new-note` creates `Sessions/agent-runs/<date>_<task>_<agent>.md` and never overwrites.
+  - `snapshot` commits the vault to its own repository with the person's Git identity and never includes `Team`. It refuses when `Team` isn't excluded or is already tracked, or when a file to be committed matches a secret pattern.
+- `vault-scan` also detects AWS access key IDs.
 - Install step 2: `~/.config/agent-home/config.env` exports `<PREFIX>_HOME`, `<PREFIX>_PROFILE` and (developer/lead with `--repos-dir`) an absolute `<PREFIX>_REPOS`, single-quoted for POSIX shells. A managed block in `~/.bashrc` sources it. Both are managed blocks, so backups, modified-file refusal and byte-exact uninstall apply. Paths with line breaks, NUL or non-UTF-8 names are refused before any change. The S7 lifecycle checks the sourced values and the restore.
 - JSON schemas `schemas/agent-home.schema.json` and `schemas/foundry.catalog.schema.json` (draft 2020-12) for shared-home authors, editors and CI. `crates/ah-core/tests/schema_parity.rs` runs a shared corpus of valid and invalid documents through both the CLI parser and the schema, and requires both to agree.
 
