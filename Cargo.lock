@@ -1077,6 +1077,7 @@ dependencies = [
  "ah-wsl",
  "anyhow",
  "assert_cmd",
+ "boon",
  "clap",
  "hex",
  "predicates",

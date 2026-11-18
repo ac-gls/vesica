@@ -5,6 +5,10 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- `vesica update` (plan §5.4): resolves a release (newest published, or `--tag`), downloads the tarball and `SHA256SUMS`, verifies the SHA-256, checks that the extracted binary reports the tag's version, replaces the binary atomically, then re-links from the recorded manifest. `--channel alpha` (default) includes pre-releases; `--channel stable` doesn't. `--dry-run` downloads and verifies but replaces nothing. Failures (checksum mismatch, missing checksum entry, wrong version) leave the installed binary untouched, and the staging directory is always removed.
+  - The manifest now records the vault path, so a re-link after an update keeps `Team` where it is.
+  - `VESICA_RELEASE_BASE_URL` and `VESICA_RELEASES_API_URL` override the download and release-list endpoints (used by tests, and usable against GitHub Enterprise mirrors).
+- `schemas/doctor.schema.json` and `crates/agent-home/tests/doctor_schema.rs`: `doctor --json` is validated against the schema for both the ok and blocked reports, and 13 document mutations (unknown status or profile, `herdr` reported as green, a required command missing, and so on) must all be rejected.
 - Install step 3 (decision D-H): `install --vault <dir>` (or `VESICA_VAULT`).
   - Creates the vault from the skeleton, or adopts an existing folder without overwriting anything.
   - Links the shared home at `<vault>/Team` instead of `~/Team`. No link is made when the shared-home checkout already lives there.

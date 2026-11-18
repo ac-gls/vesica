@@ -81,6 +81,19 @@ Findings print `path:line:rule: message` and never the offending text.
 | VSH014 | The skill's `name` doesn't match its folder name. |
 | VSH015 | The skill's `description` is missing or blank. |
 
+## `vesica update`
+
+| Message | Meaning / fix |
+|---|---|
+| `Already up to date: vesica X (vY)` | The resolved tag is already installed. Nothing to do. |
+| `no published release found for the stable channel` | Only pre-releases exist so far. Use `--channel alpha` (the default), or wait for a stable release. |
+| `checksum mismatch for …: refusing to replace the binary` | The download doesn't match `SHA256SUMS`. The installed binary is untouched. Retry; if it persists, don't work around it. |
+| `SHA256SUMS has no checksum for …` | The release is incomplete or was tampered with. Nothing was installed. |
+| `the released binary reports '…', expected '…'` | The artifact and the tag disagree. Nothing was installed. Report it. |
+| `download failed: …` | Network, or the tag/release doesn't exist. `GITHUB_TOKEN`/`GH_TOKEN` raises the API rate limit. |
+| `tag must look like vX.Y.Z or vX.Y.Z-pre.N` | Fix `--tag`. |
+| `No manifest recorded at …; skipping re-link` | The binary was replaced, but there's no install to re-link. Run `vesica install` if you expected one. |
+
 ## `vesica vault`
 
 | Message | Fix |
