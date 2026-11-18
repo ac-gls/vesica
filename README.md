@@ -21,7 +21,7 @@ SHARED=/path/to/shared-home-checkout
 TRIAL=$(mktemp -d)
 vesica doctor --home-repo "$SHARED"
 vesica install --home-repo "$SHARED" --root "$TRIAL" --dry-run
-vesica install --home-repo "$SHARED" --root "$TRIAL"   # add --repos-dir DIR to clone developer/lead repos
+vesica install --home-repo "$SHARED" --root "$TRIAL" --vault "$TRIAL/vault"   # add --repos-dir DIR to clone repos
 vesica status --root "$TRIAL"
 vesica uninstall --root "$TRIAL"
 ```
