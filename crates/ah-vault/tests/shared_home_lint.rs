@@ -280,3 +280,164 @@ fn frontmatter_semantics_are_stable() {
         ["VSH011"]
     );
 }
+
+/// A scratch copy of the fixture shared home, for lint cases that need to add files.
+fn scratch_home() -> tempfile::TempDir {
+    fn copy(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).unwrap();
+            }
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    copy(&fixture_home(), temp.path());
+    temp
+}
+
+fn rules_for(root: &Path, rel: &str) -> Vec<&'static str> {
+    lint_shared_home(root)
+        .unwrap()
+        .into_iter()
+        .filter(|f| f.path == Path::new(rel))
+        .map(|f| f.rule)
+        .collect()
+}
+
+#[test]
+fn size_limit_ignores_git_metadata() {
+    // A real shared-home clone has pack files over 1 MB; they are not shared-home content.
+    let home = scratch_home();
+    std::fs::create_dir_all(home.path().join(".git/objects/pack")).unwrap();
+    std::fs::write(
+        home.path().join(".git/objects/pack/pack-1.pack"),
+        vec![0u8; 1_500_000],
+    )
+    .unwrap();
+    assert!(
+        lint_shared_home(home.path())
+            .unwrap()
+            .iter()
+            .all(|f| !f.path.starts_with(".git")),
+        "lint must not inspect .git/"
+    );
+}
+
+#[test]
+fn d28_binaries_must_be_lfs_tracked_and_lfs_files_are_exempt_from_the_size_cap() {
+    let home = scratch_home();
+    std::fs::create_dir_all(home.path().join("Knowledge/Tools/assets")).unwrap();
+    // Covered by the fixture's `*.svg filter=lfs` rule: allowed, and exempt from the 1 MB cap.
+    std::fs::write(
+        home.path().join("Knowledge/Tools/assets/big.svg"),
+        vec![b' '; 2_000_000],
+    )
+    .unwrap();
+    // A D28 type whose LFS rule is removed below: must be flagged even when small.
+    std::fs::write(
+        home.path().join("Knowledge/Tools/assets/scan.pdf"),
+        b"%PDF-1.7",
+    )
+    .unwrap();
+    // Not a D28 type and not LFS: the 1 MB cap still applies.
+    std::fs::write(
+        home.path().join("Knowledge/Tools/assets/dump.txt"),
+        vec![b'x'; 1_500_000],
+    )
+    .unwrap();
+    let attrs = std::fs::read_to_string(home.path().join(".gitattributes")).unwrap();
+    std::fs::write(
+        home.path().join(".gitattributes"),
+        attrs.replace("*.pdf filter=lfs diff=lfs merge=lfs -text\n", ""),
+    )
+    .unwrap();
+
+    assert!(rules_for(home.path(), "Knowledge/Tools/assets/big.svg").is_empty());
+    assert_eq!(
+        rules_for(home.path(), "Knowledge/Tools/assets/scan.pdf"),
+        ["VSH012"]
+    );
+    assert_eq!(
+        rules_for(home.path(), "Knowledge/Tools/assets/dump.txt"),
+        ["VSH002"]
+    );
+
+    // A later rule that unsets the filter wins, as in Git.
+    std::fs::write(
+        home.path().join(".gitattributes"),
+        format!("{attrs}Knowledge/**/big.svg -filter\n"),
+    )
+    .unwrap();
+    let big = rules_for(home.path(), "Knowledge/Tools/assets/big.svg");
+    assert!(
+        big.contains(&"VSH012") && big.contains(&"VSH002"),
+        "{big:?}"
+    );
+}
+
+#[test]
+fn skill_lint_checks_name_folder_and_description() {
+    let home = scratch_home();
+    let skill = |dir: &str, body: &str| {
+        let path = home.path().join(dir);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("SKILL.md"), body).unwrap();
+    };
+    skill(
+        "Agents/Skills/good-skill",
+        "---\nname: good-skill\ndescription: Use when testing.\n---\nbody\n",
+    );
+    skill(
+        "Agents/Skills/renamed",
+        "---\nname: other-name\ndescription: Use when testing.\n---\n",
+    );
+    skill("Agents/Skills/no-desc", "---\nname: no-desc\n---\n");
+    skill(
+        "Agents/Skills/blank-desc",
+        "---\nname: blank-desc\ndescription: \"  \"\n---\n",
+    );
+    skill("Agents/Skills/no-frontmatter", "just text\n");
+    skill(
+        "Standards/Skills/bad-yaml",
+        "---\nname: [unclosed\ndescription: x\n---\n",
+    );
+    skill(
+        "Agents/Hermes/Skills/hermes-x",
+        "---\nname: hermes-x\ndescription: Use when orchestrating.\n---\n",
+    );
+    // Outside Agents/ and Standards/, SKILL.md files are not skill-lint's business.
+    skill("Knowledge/Tools/not-a-skill", "---\ntitle: x\n---\n");
+
+    assert!(rules_for(home.path(), "Agents/Skills/good-skill/SKILL.md").is_empty());
+    assert!(rules_for(home.path(), "Agents/Hermes/Skills/hermes-x/SKILL.md").is_empty());
+    assert_eq!(
+        rules_for(home.path(), "Agents/Skills/renamed/SKILL.md"),
+        ["VSH014"]
+    );
+    assert_eq!(
+        rules_for(home.path(), "Agents/Skills/no-desc/SKILL.md"),
+        ["VSH015"]
+    );
+    assert_eq!(
+        rules_for(home.path(), "Agents/Skills/blank-desc/SKILL.md"),
+        ["VSH015"]
+    );
+    assert_eq!(
+        rules_for(home.path(), "Agents/Skills/no-frontmatter/SKILL.md"),
+        ["VSH013"]
+    );
+    assert_eq!(
+        rules_for(home.path(), "Standards/Skills/bad-yaml/SKILL.md"),
+        ["VSH013"]
+    );
+    assert!(
+        !rules_for(home.path(), "Knowledge/Tools/not-a-skill/SKILL.md")
+            .iter()
+            .any(|r| matches!(*r, "VSH013" | "VSH014" | "VSH015"))
+    );
+}

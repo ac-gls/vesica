@@ -61,6 +61,24 @@ reported, and its manifest entry is retained so you can rerun after fixing it.
 
 Uninstall never deletes cloned repositories or your notes.
 
+## `vesica lint` (shared home)
+
+Findings print `path:line:rule: message` and never the offending text.
+
+| Rule | Meaning / fix |
+|---|---|
+| VSH001 | An area folder under `Knowledge/`, `Decisions/` or `Templates/` has no `README.md`. |
+| VSH002 | A non-LFS file is over 1 MB (D28). Move it to Git LFS or shrink it. `.git/` is not checked. |
+| VSH003 | A personal filesystem path (`/mnt/`, `/home/`, `C:\Users\`). |
+| VSH004 | A wikilink doesn't resolve inside the shared home. |
+| VSH006 | A credential pattern. Remove it and rotate the credential. |
+| VSH007 | An email address in a Markdown note. |
+| VSH008–VSH011 | Note frontmatter: missing or invalid, required fields, `authority` (`working`/`mirror`/`digest`), and `source` for mirrors and digests. |
+| VSH012 | An `svg`/`png`/`jpg`/`jpeg`/`pdf` file isn't covered by a `filter=lfs` rule in the root `.gitattributes` (D28). Add e.g. `*.svg filter=lfs diff=lfs merge=lfs -text`. A later `-filter` line overrides an earlier one, as in Git. |
+| VSH013 | A `SKILL.md` under `Agents/` or `Standards/` has missing or invalid YAML frontmatter. Quote values that contain `: `. |
+| VSH014 | The skill's `name` doesn't match its folder name. |
+| VSH015 | The skill's `description` is missing or blank. |
+
 ## `vesica vault`
 
 | Message | Fix |
