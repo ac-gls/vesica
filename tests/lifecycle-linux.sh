@@ -210,6 +210,16 @@ check S7 "repeat install leaves the cloned repository as Present" sh -c '"$1" in
 check S7 "no temporary clone directories left" sh -c 'test "$(ls -A "$1")" = sample-app' _ "$RD"
 check S7 "uninstall keeps cloned repositories" sh -c '"$1" uninstall --root "$2" >/dev/null && test -f "$3/sample-app/README.md"' _ "$BIN" "$RH" "$RD"
 
+# ---------------------------------------------------------------- B6: agent wiring (OpenCode, Copilot, Hermes plan)
+OW="$TMP/h-wiring"; OV="$TMP/vault-wiring"
+mkdir -p "$OW/.config/opencode"
+printf '{\n  // my settings\n  "theme": "tokyonight",\n  "instructions": ["~/old.md"],\n}' >"$OW/.config/opencode/opencode.json"
+cp "$OW/.config/opencode/opencode.json" "$TMP/opencode.orig"
+check S7 "install merges OpenCode instructions and keeps the user's own" sh -c '"$1" install --home-repo "$2" --root "$3" --vault "$4" >/dev/null && grep -q "// my settings" "$3/.config/opencode/opencode.json" && grep -q "~/old.md" "$3/.config/opencode/opencode.json" && grep -q "$(realpath "$2")/AGENTS.md" "$3/.config/opencode/opencode.json" && grep -q "$4/AGENTS.md" "$3/.config/opencode/opencode.json"' _ "$BIN" "$TMP/shared" "$OW" "$OV"
+check S7 "config.env exports the Copilot instruction directories" bash --noprofile --norc -c '. "$1/.bashrc" && test "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = "$(realpath "$2"),$3"' _ "$OW" "$TMP/shared" "$OV"
+check S7 "uninstall restores the merged OpenCode config byte-for-byte" sh -c '"$1" uninstall --root "$2" >/dev/null && cmp -s "$3" "$2/.config/opencode/opencode.json"' _ "$BIN" "$OW" "$TMP/opencode.orig"
+check S7 "the Hermes plan is printed for the lead profile and writes no Hermes config" sh -c '"$1" install --home-repo "$2" --root "$3" --vault "$4" --profile lead >"$5" && grep -q "^  hermes --profile team config set skills.external_dirs " "$5" && grep -q "skills.create_dir" "$5" && test ! -e "$3/.hermes"' _ "$BIN" "$TMP/shared" "$TMP/h-hermes" "$TMP/vault-hermes" "$TMP/hermes.out"
+
 # ---------------------------------------------------------------- B7: sync-standards --dry-run (decision D-I)
 printf 'standards = true\n' >>"$RSH/agent-home.toml"
 check S7 "sync-standards --dry-run plans the write and writes nothing" sh -c '"$1" sync-standards --home-repo "$2" --repos-dir "$3" --dry-run >"$4" && grep -q "^  Would create: .github/instructions/coding-standards.instructions.md -> " "$4" && grep -q "^Dry run: " "$4" && test ! -e "$3/sample-app/.github"' _ "$BIN" "$RSH" "$RD" "$TMP/sync.out"

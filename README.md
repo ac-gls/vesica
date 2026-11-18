@@ -31,7 +31,7 @@ vesica uninstall --root "$TRIAL"
 | Command | Does |
 |---|---|
 | `doctor` | Read-only Linux preflight: platform, required `git`/`gh`/`curl`/`sha256sum`, optional `az`/`node`, shared-home config. Blockers exit non-zero. |
-| `install` | Links the shared home and its skills, adds managed import blocks to Claude Code and Codex instruction files, writes `~/.config/agent-home/config.env` (sourced from `~/.bashrc`), and (with `--repos-dir`) clones missing developer/lead repositories. Never overwrites; refuses on any unmanaged destination. |
+| `install` | Links the shared home and its skills, adds managed import blocks to Claude Code and Codex instruction files, merges OpenCode's `instructions` list, writes `~/.config/agent-home/config.env` (sourced from `~/.bashrc`), and (with `--repos-dir`) clones missing developer/lead repositories. Never overwrites; refuses on any unmanaged destination. |
 | `update` | Fetches a release, verifies its SHA-256 and version, replaces the binary, then re-links your setup from the recorded manifest. `--dry-run` verifies without replacing. |
 | `status` / `uninstall` | Reports, or removes and restores, only what Vesica can prove it created. Originals are restored byte-for-byte. |
 | `share` | Promotes a personal note into the shared home on a `share/<note>` branch: rewrites links, adds `owner`/`authority`, gates on `lint` and `vault-scan`, and asks for `--yes` before writing anything. Trunk is never written and nothing is pushed. |

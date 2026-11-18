@@ -1077,6 +1077,20 @@ fn install(o: InstallOptions) -> Result<()> {
     if let Some(vault) = &vault {
         exports.push(shell_export(prefix, "VAULT", path_text(vault)?)?);
     }
+    // The Copilot CLI variable name is fixed by Copilot, and its value is a comma-separated list,
+    // so it is written literally rather than through the team's env prefix.
+    let mut instruction_files = vec![shared.join("AGENTS.md").to_string_lossy().into_owned()];
+    if let Some(vault) = &vault {
+        instruction_files.push(vault.join("AGENTS.md").to_string_lossy().into_owned());
+    }
+    let copilot_dirs = match &vault {
+        Some(vault) => format!("{},{}", shared.display(), vault.display()),
+        None => shared.display().to_string(),
+    };
+    exports.push(format!(
+        "export COPILOT_CUSTOM_INSTRUCTIONS_DIRS={}",
+        shell_quote(&copilot_dirs)?
+    ));
     if let (false, Some(dir)) = (profile.profile == ah_core::Profile::Core, &o.repos_dir) {
         let dir = std::path::absolute(dir)
             .with_context(|| format!("cannot resolve --repos-dir {}", dir.display()))?;
@@ -1090,6 +1104,36 @@ fn install(o: InstallOptions) -> Result<()> {
             destination: team_link.to_string_lossy().into_owned(),
         });
     }
+    // OpenCode reads `instructions` from its own JSONC config. Existing entries are kept: the
+    // merge replaces array values, so the union is computed here.
+    let opencode_path = home.join(".config/opencode/opencode.json");
+    let mut opencode_instructions: Vec<String> = std::fs::read_to_string(&opencode_path)
+        .ok()
+        .and_then(|text| {
+            jsonc_parser::parse_to_serde_value::<serde_json::Value>(
+                &text,
+                &jsonc_parser::ParseOptions::default(),
+            )
+            .ok()
+        })
+        .and_then(|value| value.get("instructions").cloned())
+        .and_then(|value| value.as_array().cloned())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    for file in &instruction_files {
+        if !opencode_instructions.contains(file) {
+            opencode_instructions.push(file.clone());
+        }
+    }
+    actions.push(ah_core::Action::MergeJsonc {
+        path: opencode_path.to_string_lossy().into_owned(),
+        patch: serde_json::json!({ "instructions": opencode_instructions }),
+    });
     actions.extend([
         ah_core::Action::UpsertBlock {
             path: home
@@ -1216,7 +1260,7 @@ fn install(o: InstallOptions) -> Result<()> {
                             anyhow::bail!("recorded symlink was modified: {}", target.display());
                         }
                     }
-                    "managed-block" => {
+                    "managed-block" | "merged-file" => {
                         let current = std::fs::read(target).with_context(|| {
                             format!("recorded managed file missing: {}", target.display())
                         })?;
@@ -1331,7 +1375,12 @@ fn install(o: InstallOptions) -> Result<()> {
                     }
                 }
             }
-            if matches!(action, ah_core::Action::UpsertBlock { .. }) {
+            if matches!(
+                action,
+                ah_core::Action::UpsertBlock { .. }
+                    | ah_core::Action::MergeJsonc { .. }
+                    | ah_core::Action::MergeToml { .. }
+            ) {
                 let target = Path::new(action.key());
                 match std::fs::read(target) {
                     Ok(bytes) => {
@@ -1461,7 +1510,40 @@ fn install(o: InstallOptions) -> Result<()> {
         "Shell environment: {} (sourced from ~/.bashrc; open a new shell to load it)",
         config_env.display()
     );
-    println!("Partial wiring: Claude and Codex only; other harnesses are not yet wired.");
+    println!(
+        "Partial wiring: Claude Code, Codex, OpenCode and Copilot CLI. Role agents and Hermes runtime configuration are not wired yet."
+    );
+    // Hermes edits its own configuration, so this is a plan the person runs (plan §5.4 step 12).
+    if profile.profile == ah_core::Profile::Lead {
+        let hermes_profile = c.hermes.profile.clone().unwrap_or_else(|| {
+            c.team
+                .name
+                .to_lowercase()
+                .chars()
+                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+                .collect::<String>()
+                .trim_matches('-')
+                .to_owned()
+        });
+        let skills = shared.join("Agents/Skills").display().to_string();
+        let hermes_skills = shared.join("Agents/Hermes/Skills").display().to_string();
+        println!("Hermes plan (lead profile; run these yourself, nothing was written):");
+        println!(
+            "  hermes --profile {hermes_profile} config set skills.external_dirs '[\"{skills}\",\"{hermes_skills}\"]'"
+        );
+        println!(
+            "  hermes --profile {hermes_profile} config set skills.create_dir '{hermes_skills}'"
+        );
+        match &vault {
+            Some(vault) => println!(
+                "  Run Hermes from the vault so its AGENTS.md loads: cd {} && hermes --profile {hermes_profile}",
+                vault.display()
+            ),
+            None => println!(
+                "  Run Hermes with the vault as the working directory once one is configured (--vault), so its AGENTS.md loads."
+            ),
+        }
+    }
     if !clone_failures.is_empty() {
         anyhow::bail!(
             "{}; managed configuration was installed, rerun install to retry",
@@ -1591,6 +1673,11 @@ fn entry(a: &ah_core::Action, backup_path: Option<&PathBuf>) -> Result<ah_core::
     let (kind, source) = match a {
         ah_core::Action::Symlink { source, .. } => ("symlink", Some(source.clone())),
         ah_core::Action::UpsertBlock { .. } => ("managed-block", None),
+        // A merged JSON/TOML file is a file Vesica edits, not one it owns: it is backed up first
+        // and restored byte-for-byte on uninstall.
+        ah_core::Action::MergeJsonc { .. } | ah_core::Action::MergeToml { .. } => {
+            ("merged-file", None)
+        }
         _ => ("file", None),
     };
     let bytes = std::fs::read(p).unwrap_or_default();
@@ -1732,6 +1819,68 @@ fn uninstall(r: Option<&Path>, dry: bool) -> Result<()> {
                     );
                     if !dry {
                         std::fs::remove_file(target)?;
+                    }
+                }
+            }
+            "merged-file" => {
+                // A merge can't be undone by stripping a block, so only an exact backup restore
+                // (or removing a file Vesica created) is safe.
+                let current = std::fs::read(target)?;
+                let installed_matches = entry
+                    .installed_sha256
+                    .as_deref()
+                    .map(|hash| hex::encode(sha2::Sha256::digest(&current)) == hash)
+                    .unwrap_or(false);
+                if !installed_matches {
+                    println!("Skipped modified merged file: {key}");
+                    retained.insert(key, entry);
+                    continue;
+                }
+                match entry.backup.as_deref().map(Path::new) {
+                    None => {
+                        println!(
+                            "{}: {key}",
+                            if dry {
+                                "Would remove created merged file"
+                            } else {
+                                "Removing created merged file"
+                            }
+                        );
+                        if !dry {
+                            std::fs::remove_file(target)?;
+                        }
+                    }
+                    Some(backup_path) => {
+                        let Some(expected) = entry.original_sha256.as_deref() else {
+                            println!("Skipped merged file without original hash: {key}");
+                            retained.insert(key, entry);
+                            continue;
+                        };
+                        let backup = match std::fs::read(backup_path) {
+                            Ok(bytes) => bytes,
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                                println!("Skipped missing backup: {key}");
+                                retained.insert(key, entry);
+                                continue;
+                            }
+                            Err(error) => return Err(error.into()),
+                        };
+                        if hex::encode(sha2::Sha256::digest(&backup)) != expected {
+                            println!("Skipped altered backup: {key}");
+                            retained.insert(key, entry);
+                            continue;
+                        }
+                        println!(
+                            "{}: {key}",
+                            if dry {
+                                "Would restore original merged file"
+                            } else {
+                                "Restoring original merged file"
+                            }
+                        );
+                        if !dry {
+                            std::fs::write(target, backup)?;
+                        }
                     }
                 }
             }

@@ -4,6 +4,18 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+### Added
+- Agent wiring (plan §5.2 / F3.4): **OpenCode** and **Copilot CLI** join Claude Code and Codex.
+  - OpenCode: `instructions` is merged into `~/.config/opencode/opencode.json` (JSONC), preserving comments, formatting and the user's own entries — the merge adds only missing paths and is idempotent.
+  - Copilot CLI: `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` is exported from `config.env` with the shared home (and the vault, with `--vault`). The name is fixed by Copilot, so it doesn't take the team's env prefix.
+  - Hermes (lead profile): install prints the command plan (`hermes --profile … config set skills.external_dirs`, `skills.create_dir`, and running Hermes from the vault) instead of editing Hermes configuration, which stays Hermes' own business.
+  - `install` now says which harnesses are wired.
+- Merged files (`MergeJsonc`/`MergeToml`) are a first-class manifest kind. They are backed up before the first merge, verified on reinstall, and on uninstall restored **byte-for-byte** from the backup (or removed when Vesica created the file). A merged file you edited afterwards is kept and reported.
+- Lifecycle coverage for all of the above (4 checks).
+
+### Fixed
+- `MergeJsonc`/`MergeToml` actions were recorded as manifest kind `file`, which install's own preflight and `uninstall` rejected: any install that merged a JSON/TOML file could not be reinstalled or uninstalled. Found by the OpenCode wiring's idempotence test.
+
 ## [0.1.0-alpha.3] - 2026-11-18
 
 Third pre-release, still a prototype for disposable trials on native Linux x86_64. It brings the release in line with the documented command set: `share`, `new-skill` and `sync-standards` exist here (they did not in `alpha.2`, which ONBOARDING already described), alongside `install --vault` and `update`.

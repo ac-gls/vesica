@@ -34,7 +34,8 @@ vesica CLI
 shared-home checkout
   ├─ AGENTS.md                         → ~/Team symlink, or <vault>/Team with --vault (install
   │                                      step 3; vault created or adopted via ah-vault)
-  ├─ AGENTS.md                         → managed import in Claude and Codex files
+  ├─ AGENTS.md                         → managed import in Claude and Codex files, merged into
+  │                                      OpenCode's instructions list
   ├─ agent-home.toml team.env_prefix   → ~/.config/agent-home/config.env (<P>_HOME, <P>_PROFILE,
   │                                      <P>_REPOS for developer/lead with --repos-dir), sourced
   │                                      by a managed block in ~/.bashrc
@@ -63,6 +64,18 @@ shared-home checkout
 `repos[].standards` (boolean, default `false`) is the per-repo opt-in for `vesica sync-standards` (decision D-I).
 
 The TOML schema validates the document after conversion to JSON (for example with Taplo's `#:schema` directive). `crates/ah-core/tests/schema_parity.rs` is the contract: every corpus case must get the same verdict from `AgentHomeConfig::parse`/`FoundryCatalog::parse` and from the schema (validated with `boon`, a dev-only dependency). A rule changed in one place and not the other fails CI.
+
+## Agent wiring
+
+| Harness | Rules | Skills |
+|---|---|---|
+| Claude Code | managed block in `~/.claude/CLAUDE.md` | `.claude/skills/<name>` |
+| Codex | managed block in `~/.codex/AGENTS.md` | `.agents/skills/<name>` |
+| OpenCode | `instructions` merged into `~/.config/opencode/opencode.json` (JSONC) | `.agents/skills/<name>` |
+| Copilot CLI | `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` in `config.env` | `.agents/skills/<name>` |
+| Hermes (lead) | printed command plan (`skills.external_dirs`, `skills.create_dir`) | shared `Agents/Skills` + `Agents/Hermes/Skills` |
+
+Merged files are a first-class manifest kind (`merged-file`): backed up before the first merge, verified on reinstall, and restored byte-for-byte by `uninstall`. **Role agents and the addressable Hermes wiring are not implemented** — the plan gates role rendering on the S3 field map, and Hermes configuration is edited by `hermes` itself.
 
 ## Promotion (`share`)
 
