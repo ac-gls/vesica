@@ -41,6 +41,10 @@ pub struct RepoConfig {
     pub url: String,
     #[serde(default)]
     pub profiles: Vec<Profile>,
+    /// Opt-in for `vesica sync-standards`: this repository receives copies of `Standards/*`
+    /// as `.github/instructions/*.instructions.md` (plan §5.4, decision D-I).
+    #[serde(default)]
+    pub standards: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

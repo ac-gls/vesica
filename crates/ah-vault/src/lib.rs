@@ -282,6 +282,40 @@ pub struct SecretFinding {
     pub line: usize,
 }
 
+/// One `Standards/*.md` file, mirrored into opted-in repositories by `vesica sync-standards`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Standard {
+    /// File stem, e.g. `coding-standards` from `Standards/coding-standards.md`.
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Files under `Standards/` that `sync-standards` mirrors, ordered by name.
+pub fn standards(shared: &std::path::Path) -> anyhow::Result<Vec<Standard>> {
+    let dir = shared.join("Standards");
+    if !dir.is_dir() {
+        anyhow::bail!("no Standards/ directory in {}", shared.display());
+    }
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let is_markdown = path.is_file() && path.extension().is_some_and(|e| e == "md");
+        if !is_markdown {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        files.push(Standard {
+            name: name.to_owned(),
+            bytes: std::fs::read(&path)?,
+        });
+    }
+    files.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(files)
+}
+
 /// Outcome of [`new_skill`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillScaffold {

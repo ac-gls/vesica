@@ -210,6 +210,11 @@ check S7 "repeat install leaves the cloned repository as Present" sh -c '"$1" in
 check S7 "no temporary clone directories left" sh -c 'test "$(ls -A "$1")" = sample-app' _ "$RD"
 check S7 "uninstall keeps cloned repositories" sh -c '"$1" uninstall --root "$2" >/dev/null && test -f "$3/sample-app/README.md"' _ "$BIN" "$RH" "$RD"
 
+# ---------------------------------------------------------------- B7: sync-standards --dry-run (decision D-I)
+printf 'standards = true\n' >>"$RSH/agent-home.toml"
+check S7 "sync-standards --dry-run plans the write and writes nothing" sh -c '"$1" sync-standards --home-repo "$2" --repos-dir "$3" --dry-run >"$4" && grep -q "^  Would create: .github/instructions/coding-standards.instructions.md -> " "$4" && grep -q "^Dry run: " "$4" && test ! -e "$3/sample-app/.github"' _ "$BIN" "$RSH" "$RD" "$TMP/sync.out"
+refuse S7 "sync-standards refuses to open PRs without separate approval" "separate approval" "$BIN" sync-standards --home-repo "$RSH" --repos-dir "$RD"
+
 # ---------------------------------------------------------------- S8: personal vault / shared home Git isolation
 REMOTE="$TMP/s8/remote.git"; SEED="$TMP/s8/seed"; V="$TMP/s8/vault"; UP="$TMP/s8/upstream"
 mkdir -p "$TMP/s8"

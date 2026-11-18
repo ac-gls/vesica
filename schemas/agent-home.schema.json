@@ -86,7 +86,7 @@
     },
     "repos": {
       "type": "array",
-      "description": "Repositories cloned for the developer and lead profiles (the core profile never clones).",
+      "description": "Repositories cloned for the developer and lead profiles (the core profile never clones). `standards = true` additionally opts a repository into `vesica sync-standards`.",
       "items": {
         "type": "object",
         "required": [
@@ -116,6 +116,11 @@
               ]
             },
             "description": "Profiles that clone this repository; empty or omitted means developer and lead."
+          },
+          "standards": {
+            "type": "boolean",
+            "default": false,
+            "description": "Per-repo opt-in for `vesica sync-standards`: this repository receives copies of `Standards/*` as `.github/instructions/*.instructions.md`."
           }
         }
       }

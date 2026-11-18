@@ -5,6 +5,10 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- `vesica sync-standards --dry-run` (plan §5.4), with the per-repo opt-in being **`standards = true`** on a `[[repos]]` entry in `agent-home.toml` (decision D-I). It plans copying each `Standards/*.md` into an opted-in checkout as `.github/instructions/<name>.instructions.md`, reporting `Would create`, `Would update` or `unchanged` per file, and never writes anything. Repos that aren't opted in or aren't cloned are reported and skipped. Anything but `--dry-run` refuses, because opening the PRs needs separate approval.
+  - `schemas/agent-home.schema.json` documents the flag, and the parser/schema parity corpus covers it (`standards` must be a boolean).
+
+### Added
 - `vesica new-skill <name>` (plan §5.4): scaffolds `Agents/Skills/<name>/SKILL.md` in the shared home **on a new `skill/<name>` branch**, committed locally and never pushed, so a person edits it and opens the PR. It refuses a dirty checkout, an existing skill, an existing branch, and unsafe names (1–64 lowercase characters, digits, `-` or `_`). `--description` sets the one-line description; without it the scaffold carries a visible TODO placeholder. The scaffold passes `vesica lint` and `vesica vault-scan` as-is. `--dry-run` prints the plan.
   - A shared home that isn't a Git repository is scaffolded without a branch or commit.
   - If the commit fails, the checkout is restored and the branch removed, so no half-written branch is left behind.
