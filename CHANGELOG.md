@@ -5,6 +5,9 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- `doctor` (text and `--json`) reports whether a **Git identity** is available, as an optional entry: the commit-writing commands (`vault snapshot`, `new-skill`, `share`) need one, while `install` does not. It is informational and never a blocker.
+
+### Added
 - `vesica share <note> --area <name> | --decisions` (plan §5.4, D26, S9): promote a personal note into the shared home as a reviewed PR.
   - **Nothing happens without `--yes`**: without it (or with `--dry-run`) the full plan prints and nothing is written, so cancelling before confirmation leaves no trace.
   - The promotion happens on a **`share/<note>` branch**; trunk is never written and nothing is pushed (`--open-pr` pushes only when asked).

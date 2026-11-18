@@ -8,6 +8,7 @@
 
 ## What currently works
 
+- A Git identity is required by the commands that commit: `vault snapshot`, `new-skill` and `share`. Set it with `git config --global user.name "Your Name"` and `git config --global user.email "you@example.com"` (or per repository). `doctor` reports whether one is available; without it those commands fail with Git's "Author identity unknown", and nothing is written.
 - `doctor` runs a read-only Linux preflight: platform (OS, architecture, distro, kernel), required commands `git`, `gh`, `curl` and `sha256sum` (a missing one is a blocker and makes `doctor` exit non-zero), and optional `az` and `node` (checked against the team's `minimum.node`). WSL detection is informational only.
 - `doctor --profile core|developer|lead` selects a profile, and its JSON report lists the repos for that profile. Profiles nest: `core` is the vault, rules, skills, roles and model config, with **no repositories**. `developer` adds repositories (and Herdr, not yet implemented). `lead` adds Hermes (not yet implemented). In `agent-home.toml`, a repo's `profiles` may list `developer` and/or `lead`; an empty list means both, and listing `core` is rejected.
 - `install --dry-run` prints the supported install plan without mutating the chosen home, including `Would clone:` lines when `--repos-dir` is given.

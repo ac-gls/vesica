@@ -93,6 +93,24 @@ fn doctor_json_matches_the_schema_for_the_ok_and_blocked_reports() {
         "blocked report: {blocked:#}"
     );
 
+    // A Git identity is reported, because vault snapshot, new-skill and share commit with it.
+    // It is informational: install works without one, so it must never be a blocker.
+    let identity = report["prerequisites"]["optional"]["git identity"]
+        .as_str()
+        .expect("doctor must report whether a Git identity is available");
+    assert!(
+        identity.starts_with("found:") || identity.starts_with("missing"),
+        "unexpected git identity status: {identity}"
+    );
+    assert!(
+        !report["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b.as_str().unwrap_or_default().contains("identity")),
+        "a missing Git identity must not be a blocker: {report:#}"
+    );
+
     // The selected profile is reflected in the report.
     let (lead_ok, lead) = doctor_json(std::path::Path::new(&full_path), &["--profile", "lead"]);
     let _ = lead_ok;
