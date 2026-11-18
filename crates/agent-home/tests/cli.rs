@@ -1186,7 +1186,7 @@ fn install_writes_a_manifest_and_uninstalls_only_untouched_managed_files() {
         .arg(&root)
         .assert()
         .success()
-        .stdout(predicate::str::contains("Recorded entries: 9"));
+        .stdout(predicate::str::contains("Recorded entries: 10"));
 
     Command::cargo_bin("vesica")
         .unwrap()

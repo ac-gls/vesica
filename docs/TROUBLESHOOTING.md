@@ -81,6 +81,14 @@ Findings print `path:line:rule: message` and never the offending text.
 | VSH014 | The skill's `name` doesn't match its folder name. |
 | VSH015 | The skill's `description` is missing or blank. |
 
+## Agent wiring
+
+| Message | Meaning |
+|---|---|
+| `Partial wiring: Claude Code, Codex, OpenCode and Copilot CLI. Role agents and Hermes runtime configuration are not wired yet.` | Expected for now. |
+| `Skipped modified merged file: …` (uninstall) | You edited a file Vesica merged into (for example `~/.config/opencode/opencode.json`) after installing. It's kept as-is, and its manifest entry is retained. |
+| `Restoring original merged file: …` | Uninstall restored your pre-merge file byte-for-byte. |
+
 ## `vesica share`
 
 | Message | Fix |

@@ -1080,6 +1080,7 @@ dependencies = [
  "boon",
  "clap",
  "hex",
+ "jsonc-parser",
  "predicates",
  "serde",
  "serde_json",
