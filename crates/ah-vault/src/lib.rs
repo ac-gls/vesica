@@ -300,7 +300,13 @@ pub fn lint_shared_home(root: &std::path::Path) -> anyhow::Result<Vec<LintFindin
     let mut findings = Vec::new();
     let mut files = Vec::new();
     let mut directories = Vec::new();
-    for entry in WalkDir::new(root).follow_links(false) {
+    // `.git/` is repository metadata, not shared-home content (pack files routinely exceed 1 MB).
+    let walker = WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| !(e.depth() == 1 && e.file_name() == ".git"));
+    let lfs = LfsRules::load(root)?;
+    for entry in walker {
         let entry = entry?;
         let relative = entry.path().strip_prefix(root)?.to_path_buf();
         if entry.file_type().is_symlink() {
@@ -353,7 +359,32 @@ pub fn lint_shared_home(root: &std::path::Path) -> anyhow::Result<Vec<LintFindin
     }
     for (relative, full, size) in &files {
         let rel = relative.to_string_lossy().replace('\\', "/");
-        if *size > 1_000_000 {
+        let lfs_tracked = lfs.tracks(&rel);
+        let d28_binary = relative
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| D28_BINARY_TYPES.contains(&e.to_ascii_lowercase().as_str()));
+        if d28_binary && !lfs_tracked {
+            findings.push(LintFinding {
+                path: relative.clone(),
+                line: 0,
+                rule: "VSH012",
+                message:
+                    "binary file type must be tracked with Git LFS (.gitattributes filter=lfs)",
+            });
+        }
+        if relative.file_name().is_some_and(|n| n == "SKILL.md")
+            && relative
+                .components()
+                .next()
+                .is_some_and(|c| c.as_os_str() == "Agents" || c.as_os_str() == "Standards")
+        {
+            if let Ok(text) = std::fs::read_to_string(full) {
+                findings.extend(lint_skill(relative, &text));
+            }
+        }
+        // D28: the 1 MB cap applies to files not stored in Git LFS.
+        if *size > 1_000_000 && !lfs_tracked {
             findings.push(LintFinding {
                 path: relative.clone(),
                 line: 0,
@@ -472,6 +503,132 @@ pub fn lint_shared_home(root: &std::path::Path) -> anyhow::Result<Vec<LintFindin
             .then(a.rule.cmp(b.rule))
     });
     Ok(findings)
+}
+
+/// File types that must live in Git LFS in the shared home (D28).
+const D28_BINARY_TYPES: &[&str] = &["svg", "png", "jpg", "jpeg", "pdf"];
+
+/// `filter` rules from the root `.gitattributes`, applied as Git does: the last matching line
+/// that sets or unsets `filter` wins. Supports `*`, `?`, `**`, anchored and basename patterns.
+struct LfsRules(Vec<(regex::Regex, bool)>);
+
+impl LfsRules {
+    fn load(root: &std::path::Path) -> anyhow::Result<Self> {
+        let text = match std::fs::read_to_string(root.join(".gitattributes")) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(error.into()),
+        };
+        let mut rules = Vec::new();
+        for line in text.lines() {
+            let mut fields = line.split_whitespace();
+            let Some(pattern) = fields.next() else {
+                continue;
+            };
+            if pattern.starts_with('#') {
+                continue;
+            }
+            let mut setting = None;
+            for attr in fields {
+                if attr == "filter=lfs" {
+                    setting = Some(true);
+                } else if attr.starts_with("filter=") || attr == "-filter" || attr == "!filter" {
+                    setting = Some(false);
+                }
+            }
+            if let Some(lfs) = setting {
+                rules.push((glob_regex(pattern)?, lfs));
+            }
+        }
+        Ok(Self(rules))
+    }
+
+    fn tracks(&self, path: &str) -> bool {
+        self.0
+            .iter()
+            .rev()
+            .find(|(pattern, _)| pattern.is_match(path))
+            .is_some_and(|(_, lfs)| *lfs)
+    }
+}
+
+fn glob_regex(pattern: &str) -> anyhow::Result<regex::Regex> {
+    let anchored = pattern.trim_start_matches('/');
+    // Without a slash (other than a leading one), Git matches the pattern against the basename.
+    let prefix = if pattern.contains('/') {
+        "^"
+    } else {
+        "^(?:.*/)?"
+    };
+    let mut out = String::from(prefix);
+    let chars: Vec<char> = anchored.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '*' if chars.get(i + 1) == Some(&'*') => {
+                if chars.get(i + 2) == Some(&'/') {
+                    out.push_str("(?:.*/)?");
+                    i += 3;
+                } else {
+                    out.push_str(".*");
+                    i += 2;
+                }
+                continue;
+            }
+            '*' => out.push_str("[^/]*"),
+            '?' => out.push_str("[^/]"),
+            c => out.push_str(&regex::escape(&c.to_string())),
+        }
+        i += 1;
+    }
+    out.push('$');
+    Ok(regex::Regex::new(&out)?)
+}
+
+/// skill-lint (plan §5.5) for `SKILL.md` under `Agents/` and `Standards/`.
+fn lint_skill(path: &std::path::Path, text: &str) -> Vec<LintFinding> {
+    use yaml_rust2::Yaml;
+    let finding = |rule, message| LintFinding {
+        path: path.to_path_buf(),
+        line: 1,
+        rule,
+        message,
+    };
+    let mut lines = text.lines();
+    let mut yaml = Vec::new();
+    let mut closed = false;
+    if lines.next().map(str::trim_end) == Some("---") {
+        for line in lines {
+            if line.trim_end() == "---" {
+                closed = true;
+                break;
+            }
+            yaml.push(line);
+        }
+    }
+    let mapping = closed
+        .then(|| yaml_rust2::YamlLoader::load_from_str(&yaml.join("\n")).ok())
+        .flatten()
+        .and_then(|docs| docs.into_iter().next());
+    let Some(Yaml::Hash(map)) = mapping else {
+        return vec![finding("VSH013", "skill frontmatter is missing or invalid")];
+    };
+    let text_field = |name: &str| match map.get(&Yaml::String(name.to_owned())) {
+        Some(Yaml::String(value)) if !value.trim().is_empty() => Some(value.trim().to_owned()),
+        _ => None,
+    };
+    let mut findings = Vec::new();
+    let folder = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str());
+    if text_field("name").as_deref() != folder {
+        findings.push(finding("VSH014", "skill name must match its folder name"));
+    }
+    if text_field("description").is_none() {
+        findings.push(finding("VSH015", "skill description is missing"));
+    }
+    findings
 }
 
 fn is_policy_markdown(path: &std::path::Path) -> bool {
@@ -700,6 +857,75 @@ pub fn scan_secrets(root: &std::path::Path) -> anyhow::Result<Vec<SecretFinding>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lfs_rules_agree_with_git_check_attr() {
+        let attributes = "* text=auto eol=lf\n\
+*.svg filter=lfs diff=lfs merge=lfs -text\n\
+*.PNG filter=lfs\n\
+/root-only.pdf filter=lfs\n\
+docs/*.pdf filter=lfs\n\
+assets/** filter=lfs\n\
+**/scans/*.jpg filter=lfs\n\
+keep?.jpg filter=lfs\n\
+assets/raw/*.txt -filter\n\
+legacy/*.svg !filter\n\
+other/*.svg filter=custom\n";
+        let paths = [
+            "a.svg",
+            "deep/dir/b.svg",
+            "c.png",
+            "c.PNG",
+            "root-only.pdf",
+            "sub/root-only.pdf",
+            "docs/x.pdf",
+            "docs/sub/x.pdf",
+            "assets/a.txt",
+            "assets/raw/b.txt",
+            "assets/raw/c.bin",
+            "scans/a.jpg",
+            "x/scans/a.jpg",
+            "x/scans/y/a.jpg",
+            "keep1.jpg",
+            "keep12.jpg",
+            "legacy/old.svg",
+            "legacy/sub/old.svg",
+            "other/o.svg",
+            "plain.md",
+        ];
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(repo.path())
+                .args(args)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap()
+        };
+        assert!(git(&["init", "-q"]).status.success());
+        std::fs::write(repo.path().join(".gitattributes"), attributes).unwrap();
+        let rules = LfsRules::load(repo.path()).unwrap();
+        let mut mismatches = Vec::new();
+        for path in paths {
+            let out = git(&["check-attr", "filter", "--", path]);
+            let git_lfs = String::from_utf8(out.stdout)
+                .unwrap()
+                .trim_end()
+                .ends_with(": filter: lfs");
+            if git_lfs != rules.tracks(path) {
+                mismatches.push(format!(
+                    "{path}: git={git_lfs} vesica={}",
+                    rules.tracks(path)
+                ));
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+        // Guard against a vacuous pass: Git itself reports exactly these 11 paths as LFS
+        // (legacy/sub/old.svg is not matched by `legacy/*.svg !filter`, so `*.svg` applies).
+        assert_eq!(paths.iter().filter(|p| rules.tracks(p)).count(), 11);
+    }
 
     #[test]
     fn reports_credential_matches_without_including_the_secret_value() {

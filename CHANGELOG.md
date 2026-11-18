@@ -12,6 +12,9 @@ All notable changes to this project are documented here. Format: [Keep a Changel
   - `new-note` creates `Sessions/agent-runs/<date>_<task>_<agent>.md` and never overwrites.
   - `snapshot` commits the vault to its own repository with the person's Git identity and never includes `Team`. It refuses when `Team` isn't excluded or is already tracked, or when a file to be committed matches a secret pattern.
 - `vault-scan` also detects AWS access key IDs.
+- `lint` D28 and skill-lint rules (plan §5.5):
+  - **VSH012:** `svg`/`png`/`jpg`/`jpeg`/`pdf` files must be LFS-tracked by the root `.gitattributes`. The matcher is checked against `git check-attr`.
+  - **VSH013–VSH015:** `SKILL.md` under `Agents/` and `Standards/` needs valid frontmatter, a `name` matching its folder, and a description.
 - Install step 2: `~/.config/agent-home/config.env` exports `<PREFIX>_HOME`, `<PREFIX>_PROFILE` and (developer/lead with `--repos-dir`) an absolute `<PREFIX>_REPOS`, single-quoted for POSIX shells. A managed block in `~/.bashrc` sources it. Both are managed blocks, so backups, modified-file refusal and byte-exact uninstall apply. Paths with line breaks, NUL or non-UTF-8 names are refused before any change. The S7 lifecycle checks the sourced values and the restore.
 - JSON schemas `schemas/agent-home.schema.json` and `schemas/foundry.catalog.schema.json` (draft 2020-12) for shared-home authors, editors and CI. `crates/ah-core/tests/schema_parity.rs` runs a shared corpus of valid and invalid documents through both the CLI parser and the schema, and requires both to agree.
 
@@ -19,6 +22,8 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 - `team.env_prefix` must not start with a digit (it names shell variables); the parser and `agent-home.schema.json` both enforce it.
 
 ### Fixed
+- `lint` size cap (VSH002) inspected `.git/`, so any real shared-home clone with a pack file over 1 MB failed. It also capped LFS-tracked files, which D28 exempts. Both are fixed.
+- The fixture skill `second-skill` had invalid YAML frontmatter (an unquoted `: ` in its description), found by the new skill-lint.
 - `foundry.catalog.json` whose root is a JSON array was accepted (serde reads structs positionally from arrays, so `["<tenant>"]` set the tenant). The catalog root must now be an object.
 
 ## [0.1.0-alpha.1] - 2026-11-18
