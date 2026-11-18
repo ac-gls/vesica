@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/ac-gls/vesica/main/schemas/agent-home.schema.json",
+  "title": "Vesica shared-home configuration (agent-home.toml)",
+  "description": "Schema version 1. Validates the TOML document after conversion to JSON. Unknown keys are ignored by the CLI and allowed here; credential-like keys are rejected everywhere.",
+  "type": "object",
+  "required": [
+    "schema",
+    "team",
+    "profiles"
+  ],
+  "allOf": [
+    {
+      "$ref": "#/$defs/credentialFree"
+    }
+  ],
+  "properties": {
+    "schema": {
+      "description": "Configuration schema version.",
+      "type": "integer",
+      "const": 1
+    },
+    "team": {
+      "type": "object",
+      "required": [
+        "name",
+        "org",
+        "env_prefix",
+        "role_prefix"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "Display name of the team."
+        },
+        "org": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "GitHub organisation that owns the team repositories."
+        },
+        "env_prefix": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_]+$",
+          "description": "Prefix for generated environment variables (e.g. <PREFIX>_HOME)."
+        },
+        "role_prefix": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "Prefix for generated role-agent names."
+        }
+      }
+    },
+    "profiles": {
+      "type": "object",
+      "required": [
+        "default"
+      ],
+      "properties": {
+        "default": {
+          "$ref": "#/$defs/profile",
+          "description": "Profile used when install is run without --profile."
+        }
+      }
+    },
+    "minimum": {
+      "type": "object",
+      "properties": {
+        "herdr": {
+          "type": "string",
+          "description": "Minimum Herdr version."
+        },
+        "node": {
+          "type": "string",
+          "description": "Minimum Node.js version for agent CLIs (checked by doctor)."
+        }
+      }
+    },
+    "hermes": {
+      "type": "object",
+      "properties": {
+        "profile": {
+          "type": "string"
+        }
+      }
+    },
+    "repos": {
+      "type": "array",
+      "description": "Repositories cloned for the developer and lead profiles (the core profile never clones).",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "url"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]*$",
+            "description": "Single directory name; must not start with '.' or '-'."
+          },
+          "url": {
+            "type": "string",
+            "pattern": "^\\s*[^\\s-]",
+            "not": {
+              "pattern": "^\\s*([eE][xX][tT]|[fF][dD])::"
+            },
+            "description": "Clone URL. Must not be empty, option-like, or use the ext:: or fd:: transports."
+          },
+          "profiles": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "developer",
+                "lead"
+              ]
+            },
+            "description": "Profiles that clone this repository; empty or omitted means developer and lead."
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "profile": {
+      "enum": [
+        "core",
+        "developer",
+        "lead"
+      ]
+    },
+    "credentialFree": {
+      "description": "No key at any depth may look like a credential (mirrors the CLI's credential-field rejection).",
+      "propertyNames": {
+        "not": {
+          "anyOf": [
+            {
+              "pattern": "([aA][pP][iI][_-]?[kK][eE][yY]|[cC][lL][iI][eE][nN][tT][_-][sS][eE][cC][rR][eE][tT]|[aA][cC][cC][eE][sS][sS][_-][tT][oO][kK][eE][nN]|[rR][eE][fF][rR][eE][sS][hH][_-][tT][oO][kK][eE][nN])"
+            },
+            {
+              "pattern": "^([pP][aA][sS][sS][wW][oO][rR][dD]|[sS][eE][cC][rR][eE][tT])$"
+            }
+          ]
+        }
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/credentialFree"
+      },
+      "items": {
+        "$ref": "#/$defs/credentialFree"
+      }
+    }
+  }
+}

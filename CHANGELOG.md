@@ -4,6 +4,12 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+### Added
+- JSON schemas `schemas/agent-home.schema.json` and `schemas/foundry.catalog.schema.json` (draft 2020-12) for shared-home authors, editors and CI. `crates/ah-core/tests/schema_parity.rs` runs a shared corpus of valid and invalid documents through both the CLI parser and the schema, and requires both to agree.
+
+### Fixed
+- `foundry.catalog.json` whose root is a JSON array was accepted (serde reads structs positionally from arrays, so `["<tenant>"]` set the tenant). The catalog root must now be an object.
+
 ## [0.1.0-alpha.1] - 2026-11-18
 
 First pre-release. It's a prototype for disposable trials on native Linux x86_64, not for real home directories. It installs only part of the target architecture: no shared-home bootstrap, `vesica share`, Foundry, Herdr or Hermes integration. Verified on Ubuntu 24.04 and 22.04 by the S7/S8 lifecycle suite, including against the published release binary.

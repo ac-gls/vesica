@@ -113,6 +113,10 @@ impl AgentHomeConfig {
 impl FoundryCatalog {
     pub fn parse(input: &str) -> anyhow::Result<Self> {
         let value: serde_json::Value = serde_json::from_str(input)?;
+        // serde would otherwise accept a JSON array positionally (e.g. `["tenant"]`).
+        if !value.is_object() {
+            anyhow::bail!("foundry.catalog.json must be a JSON object");
+        }
         reject_credentials_json(&value, "")?;
         Ok(serde_json::from_value(value)?)
     }
@@ -279,5 +283,8 @@ mod tests {
         let catalog = FoundryCatalog::from_path(&path).unwrap();
         assert_eq!(catalog.defaults["codex"], "gpt-codex");
         assert!(FoundryCatalog::parse(r#"{"api_key":"must-not-be-here"}"#).is_err());
+        // serde reads structs positionally from arrays; the catalog root must be an object.
+        assert!(FoundryCatalog::parse("[]").is_err());
+        assert!(FoundryCatalog::parse(r#"["00000000-0000-0000-0000-000000000000"]"#).is_err());
     }
 }

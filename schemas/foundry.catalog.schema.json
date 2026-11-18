@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/ac-gls/vesica/main/schemas/foundry.catalog.schema.json",
+  "title": "Vesica Foundry model catalog (foundry.catalog.json)",
+  "description": "Names only: tenant, model resources, deployments and per-agent defaults. Secrets are never stored here; credential-like keys are rejected everywhere. Unknown keys are allowed (e.g. $schema).",
+  "type": "object",
+  "allOf": [
+    {
+      "$ref": "#/$defs/credentialFree"
+    }
+  ],
+  "properties": {
+    "tenant": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Entra tenant ID."
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Logical resource name -> Foundry resource name."
+    },
+    "deployments": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Logical model name -> deployment name."
+    },
+    "defaults": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Agent -> logical model name (or a provider keyword such as github-hosted)."
+    }
+  },
+  "$defs": {
+    "credentialFree": {
+      "description": "No key at any depth may look like a credential (mirrors the CLI's credential-field rejection).",
+      "propertyNames": {
+        "not": {
+          "anyOf": [
+            {
+              "pattern": "([aA][pP][iI][_-]?[kK][eE][yY]|[cC][lL][iI][eE][nN][tT][_-][sS][eE][cC][rR][eE][tT]|[aA][cC][cC][eE][sS][sS][_-][tT][oO][kK][eE][nN]|[rR][eE][fF][rR][eE][sS][hH][_-][tT][oO][kK][eE][nN])"
+            },
+            {
+              "pattern": "^([pP][aA][sS][sS][wW][oO][rR][dD]|[sS][eE][cC][rR][eE][tT])$"
+            }
+          ]
+        }
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/credentialFree"
+      },
+      "items": {
+        "$ref": "#/$defs/credentialFree"
+      }
+    }
+  }
+}

@@ -30,6 +30,17 @@ shared-home checkout
 - `ah-herdr`: placeholder only; runtime client is not implemented.
 - `vesica`: currently wires the limited workflows listed above.
 
+## Configuration schemas
+
+`schemas/agent-home.schema.json` and `schemas/foundry.catalog.schema.json` (JSON Schema draft 2020-12) describe the two shared-home files. They mirror the parser exactly:
+- required fields and the schema version;
+- the `env_prefix` pattern and the profile enum;
+- repository name and URL safety, and no `core` in a repository's `profiles`;
+- the recursive credential-key ban;
+- unknown keys allowed, as the parser ignores them.
+
+The TOML schema validates the document after conversion to JSON (for example with Taplo's `#:schema` directive). `crates/ah-core/tests/schema_parity.rs` is the contract: every corpus case must get the same verdict from `AgentHomeConfig::parse`/`FoundryCatalog::parse` and from the schema (validated with `boon`, a dev-only dependency). A rule changed in one place and not the other fails CI.
+
 ## Safety and transaction
 
 The CLI preflights unsafe state paths. Installer mutations, backup creation, and manifest persistence now share a best-effort rollback transaction. Manifest writes use exclusive temporary-file creation, syncing before atomic replacement, and mode `0600` for new Unix manifests. Backups are created exclusively and only removed on transaction failure if their bytes remain unchanged; cleanup/rollback errors are included in the reported failure. Tests cover manifest temp-file and symlink collisions, user-content preservation, and CLI install rollback.
