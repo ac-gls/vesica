@@ -926,6 +926,66 @@ fn install_writes_a_manifest_and_uninstalls_only_untouched_managed_files() {
 }
 
 #[test]
+fn repeat_install_does_not_create_orphan_backups() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    let claude = root.join(".claude/CLAUDE.md");
+    std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+    std::fs::write(&claude, "# existing user rules\n").unwrap();
+    let backups = |root: &std::path::Path| -> Vec<String> {
+        let mut found = Vec::new();
+        for dir in [".claude", ".codex"] {
+            if let Ok(entries) = std::fs::read_dir(root.join(dir)) {
+                for entry in entries {
+                    let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+                    if name.contains(".vesica-backup-") {
+                        found.push(format!("{dir}/{name}"));
+                    }
+                }
+            }
+        }
+        found.sort();
+        found
+    };
+    let install = || {
+        Command::cargo_bin("vesica")
+            .unwrap()
+            .args(["install", "--home-repo"])
+            .arg(fixture_home())
+            .arg("--root")
+            .arg(&root)
+            .assert()
+            .success();
+    };
+
+    install();
+    let first = backups(&root);
+    assert_eq!(
+        first.len(),
+        1,
+        "only the pre-existing Claude file is backed up: {first:?}"
+    );
+    install();
+    install();
+    assert_eq!(
+        backups(&root),
+        first,
+        "repeat installs must not add backups"
+    );
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .assert()
+        .success();
+    assert_eq!(std::fs::read(&claude).unwrap(), b"# existing user rules\n");
+    assert!(!root.join(".codex/AGENTS.md").exists());
+    // Uninstall conservatively keeps the recorded backup; there must be no unrecorded extras.
+    assert_eq!(backups(&root), first, "no orphan backups after uninstall");
+}
+
+#[test]
 fn uninstall_restores_legacy_agent_home_managed_blocks() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("home");
