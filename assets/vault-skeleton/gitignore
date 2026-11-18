@@ -1,0 +1,5 @@
+# Vesica personal vault
+# The shared home is its own repository and never part of a personal snapshot (D30).
+/Team
+.obsidian/workspace*.json
+.trash/

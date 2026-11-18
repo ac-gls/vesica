@@ -20,6 +20,8 @@ enum Command {
     Lint(LintOptions),
     VaultScan(VaultScanOptions),
     Team(TeamOptions),
+    /// Personal vault: create, adopt, check, ledger notes and snapshots
+    Vault(VaultOptions),
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ProfileArg {
@@ -108,6 +110,60 @@ enum TeamCommand {
     Pull(TeamPullOptions),
 }
 #[derive(Debug, clap::Args)]
+struct VaultOptions {
+    #[command(subcommand)]
+    command: VaultCommand,
+}
+#[derive(Debug, clap::Args)]
+struct VaultPath {
+    #[arg(long, env = "VESICA_VAULT", help = "Personal vault directory")]
+    path: PathBuf,
+}
+#[derive(Debug, Subcommand)]
+enum VaultCommand {
+    /// Create a new vault from the skeleton (directory must be absent or empty)
+    Init {
+        #[command(flatten)]
+        vault: VaultPath,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Adopt an existing folder: add missing skeleton entries and exclude Team; never overwrites
+    Fix {
+        #[command(flatten)]
+        vault: VaultPath,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Read-only vault contract check
+    Check {
+        #[command(flatten)]
+        vault: VaultPath,
+    },
+    /// Create a ledger note in Sessions/agent-runs/
+    NewNote {
+        #[command(flatten)]
+        vault: VaultPath,
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        agent: String,
+        #[arg(long, help = "YYYY-MM-DD (default: today, UTC)")]
+        date: Option<String>,
+        #[arg(long, default_value = "general")]
+        area: String,
+        #[arg(long)]
+        title: Option<String>,
+    },
+    /// Commit the vault to its own Git repository, never including Team
+    Snapshot {
+        #[command(flatten)]
+        vault: VaultPath,
+        #[arg(long)]
+        message: Option<String>,
+    },
+}
+#[derive(Debug, clap::Args)]
 struct RootOptions {
     #[arg(long, env = "AGENT_HOME_ROOT", env = "VESICA_ROOT")]
     root: Option<PathBuf>,
@@ -134,6 +190,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Uninstall(o) => uninstall(o.root.as_deref(), o.dry_run),
         Command::Lint(o) => lint(&o.home_repo),
         Command::VaultScan(o) => vault_scan(&o.path),
+        Command::Vault(o) => vault(o.command),
         Command::Team(o) => match o.command {
             TeamCommand::Status(options) => team_status(&required_team_path(options.path)?),
             TeamCommand::Pull(options) => team_pull(&required_team_path(options.path)?),
@@ -192,6 +249,96 @@ fn lint(path: &Path) -> Result<()> {
         );
     }
     anyhow::bail!("{} lint finding(s)", findings.len())
+}
+
+fn utc_date() -> String {
+    let stamp = utc_stamp(std::time::SystemTime::now());
+    format!("{}-{}-{}", &stamp[0..4], &stamp[4..6], &stamp[6..8])
+}
+
+fn vault(command: VaultCommand) -> Result<()> {
+    use ah_vault::personal::{self, VaultChange};
+    let print_changes = |changes: &[VaultChange], dry: bool| {
+        let mut any = false;
+        for change in changes {
+            let line = match (change, dry) {
+                (VaultChange::Kept(name), _) => format!("Kept existing: {name}"),
+                (VaultChange::Create(name), true) => format!("Would create: {name}"),
+                (VaultChange::Create(name), false) => format!("Created: {name}"),
+                (VaultChange::ExcludeTeam, true) => "Would update: .gitignore (add /Team)".into(),
+                (VaultChange::ExcludeTeam, false) => "Updated: .gitignore (added /Team)".into(),
+                (VaultChange::GitInit, true) => "Would initialise a Git repository".into(),
+                (VaultChange::GitInit, false) => "Initialised a Git repository".into(),
+            };
+            any |= !matches!(change, VaultChange::Kept(_));
+            println!("{line}");
+        }
+        any
+    };
+    match command {
+        VaultCommand::Init { vault, dry_run } => {
+            let changes = personal::init(&vault.path, &utc_date(), dry_run)?;
+            print_changes(&changes, dry_run);
+            if !dry_run {
+                println!("Vault created: {}", vault.path.display());
+            }
+        }
+        VaultCommand::Fix { vault, dry_run } => {
+            let changes = personal::fix(&vault.path, &utc_date(), dry_run)?;
+            if !print_changes(&changes, dry_run) {
+                println!("Nothing to fix: {}", vault.path.display());
+            }
+        }
+        VaultCommand::Check { vault } => {
+            let findings = personal::check(&vault.path)?;
+            if findings.is_empty() {
+                println!("vault check: ok ({})", vault.path.display());
+                return Ok(());
+            }
+            for f in &findings {
+                match f.line {
+                    Some(line) => println!("{} {}:{line}: {}", f.rule, f.path, f.message),
+                    None => println!("{} {}: {}", f.rule, f.path, f.message),
+                }
+            }
+            anyhow::bail!("{} vault finding(s)", findings.len());
+        }
+        VaultCommand::NewNote {
+            vault,
+            task,
+            agent,
+            date,
+            area,
+            title,
+        } => {
+            let date = date.unwrap_or_else(utc_date);
+            let rel = personal::new_note(
+                &vault.path,
+                &personal::LedgerNote {
+                    task: &task,
+                    agent: &agent,
+                    date: &date,
+                    area: &area,
+                    title: title.as_deref(),
+                },
+            )?;
+            println!("Created ledger note: {rel}");
+        }
+        VaultCommand::Snapshot { vault, message } => {
+            let message = message.unwrap_or_else(|| {
+                format!("vault snapshot {}", utc_stamp(std::time::SystemTime::now()))
+            });
+            match personal::snapshot(&vault.path, &message)? {
+                personal::SnapshotOutcome::Committed { commit, files } => {
+                    println!("Snapshot {commit}: {files} file(s) committed (Team excluded)")
+                }
+                personal::SnapshotOutcome::NothingToSnapshot => {
+                    println!("Nothing to snapshot: the vault matches its last snapshot")
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn vault_scan(path: &Path) -> Result<()> {

@@ -1,5 +1,7 @@
 //! Vault safety utilities and personal vault workflows.
 
+pub mod personal;
+
 use anyhow::Context;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -643,36 +645,53 @@ fn email_address_pattern() -> &'static regex::Regex {
 }
 
 /// Scan text files for common high-confidence credential patterns. Findings omit matched text.
+fn secret_patterns() -> &'static [regex::Regex] {
+    static PATTERNS: std::sync::OnceLock<Vec<regex::Regex>> = std::sync::OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        [
+            r"\bgh[pousr]_[A-Za-z0-9]{30,}\b",
+            r"\bgithub_pat_[A-Za-z0-9_]{30,}\b",
+            r"\bsk-[A-Za-z0-9_-]{24,}\b",
+            r"\b(AKIA|ASIA)[A-Z0-9]{16}\b",
+            r"(?i)\b(password|client_secret|api_key)\s*[:=]\s*[^\s#]{8,}",
+            r"-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----",
+        ]
+        .iter()
+        .map(|p| regex::Regex::new(p).expect("valid secret pattern"))
+        .collect()
+    })
+}
+
+/// 1-based line numbers of a bounded-size UTF-8 file that match a secret pattern.
+pub(crate) fn scan_file(path: &std::path::Path) -> anyhow::Result<Vec<usize>> {
+    if std::fs::metadata(path)?.len() > 2_000_000 {
+        return Ok(Vec::new());
+    }
+    let bytes = std::fs::read(path)?;
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return Ok(Vec::new());
+    };
+    Ok(text
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| secret_patterns().iter().any(|p| p.is_match(line)))
+        .map(|(index, _)| index + 1)
+        .collect())
+}
+
 pub fn scan_secrets(root: &std::path::Path) -> anyhow::Result<Vec<SecretFinding>> {
-    use regex::Regex;
     use walkdir::WalkDir;
-    let patterns = [
-        Regex::new(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b")?,
-        Regex::new(r"\bgithub_pat_[A-Za-z0-9_]{30,}\b")?,
-        Regex::new(r"\bsk-[A-Za-z0-9_-]{24,}\b")?,
-        Regex::new(r"(?i)\b(password|client_secret|api_key)\s*[:=]\s*[^\s#]{8,}")?,
-        Regex::new(r"-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----")?,
-    ];
     let mut found = Vec::new();
     for entry in WalkDir::new(root).follow_links(false) {
         let entry = entry?;
-        if entry.file_type().is_symlink()
-            || !entry.file_type().is_file()
-            || entry.metadata()?.len() > 2_000_000
-        {
+        if entry.file_type().is_symlink() || !entry.file_type().is_file() {
             continue;
         }
-        let bytes = std::fs::read(entry.path())?;
-        let Ok(text) = std::str::from_utf8(&bytes) else {
-            continue;
-        };
-        for (index, line) in text.lines().enumerate() {
-            if patterns.iter().any(|pattern| pattern.is_match(line)) {
-                found.push(SecretFinding {
-                    path: entry.path().to_path_buf(),
-                    line: index + 1,
-                });
-            }
+        for line in scan_file(entry.path())? {
+            found.push(SecretFinding {
+                path: entry.path().to_path_buf(),
+                line,
+            });
         }
     }
     Ok(found)
