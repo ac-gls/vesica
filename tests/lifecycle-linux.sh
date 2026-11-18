@@ -128,8 +128,10 @@ if "$BIN" doctor --json --home-repo "$TMP/shared" >"$TMP/doctor.json" 2>&1 \
 else failc S7 "doctor --json: Linux preflight ok, unimplemented integrations reported as not-implemented" "$(head -c 160 "$TMP/doctor.json")"; fi
 
 H="$TMP/h"
-mkdir -p "$H/.claude" "$H/notes"
+mkdir -p "$H/.claude" "$H/.codex" "$H/notes"
 printf '# my existing Claude rules\n' >"$H/.claude/CLAUDE.md"
+printf '# codex rules\r\n\tCRLF, tab, no final newline' >"$H/.codex/AGENTS.md"
+cp "$H/.codex/AGENTS.md" "$TMP/codex.orig"
 printf 'personal note\n' >"$H/notes/private.md"
 cp "$H/.claude/CLAUDE.md" "$TMP/claude.orig"
 snapshot "$H" >"$TMP/h.pre"
@@ -184,6 +186,7 @@ check S7 "uninstall retains a user-modified managed file" sh -c 'grep -q "user-a
 check S7 "uninstall succeeds" "$BIN" uninstall --root "$H"
 check S7 "uninstall removed Team and skill links" sh -c 'test ! -e "$1/Team" && test ! -L "$1/.agents/skills/demo-skill" && test ! -L "$1/.claude/skills/demo-skill"' _ "$H"
 check S7 "uninstall restored pre-existing Claude rules byte-for-byte" cmp -s "$TMP/claude.orig" "$H/.claude/CLAUDE.md"
+check S7 "uninstall restored a CRLF file without final newline byte-for-byte" cmp -s "$TMP/codex.orig" "$H/.codex/AGENTS.md"
 check S7 "uninstall kept the personal note" sh -c 'grep -qx "personal note" "$1"' _ "$H/notes/private.md"
 snapshot "$TMP/shared" >"$TMP/shared.after"
 check S7 "shared-home content unchanged by the whole lifecycle" same "$TMP/shared.before" "$TMP/shared.after"

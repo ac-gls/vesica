@@ -52,7 +52,7 @@ These are Linux/WSL development-container results. Installer fixtures simulate L
 4. Existing Claude/Codex files are backed up before managed-block changes. Repeat installs reuse recorded backups; backups use exclusive creation and are removed if a failed plan/manifest write rolls back, unless their content changed in the meantime.
 5. Action execution and manifest persistence share a rollback transaction: if manifest commit fails after actions succeed, the executor attempts reverse-order rollback and reports rollback errors without overwriting intervening edits.
 6. Manifest writes use a unique-create temp file, restrictive Unix permissions, flush/sync, then rename; a preexisting temp file or symlink is not followed or overwritten.
-7. The JSON manifest records install targets, source paths, backups, and hashes. Uninstall restores/removes only entries it can verify; ambiguous or modified content is retained and reported.
+7. The JSON manifest records install targets, source paths, backups, and hashes. Uninstall restores/removes only entries it can verify; ambiguous or modified content is retained and reported. A backed-up managed file is restored only when it still matches the installed hash *and* re-applying the install transform to the verified backup reproduces it exactly. The backup bytes are then written back, so CRLF endings, a missing final newline and other formatting round-trip byte-for-byte.
 8. Symlinks are created only at absent destinations or accepted if already correct; existing user destinations are never replaced.
 9. Secret scan output contains locations only. Scanner limits individual files to 2 MB and does not traverse symlinks.
 

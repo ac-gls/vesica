@@ -1,0 +1,19 @@
+---
+source: crates/ah-config/tests/format_preservation.rs
+expression: out
+---
+# Codex config
+model = "gpt-5"  # inline note
+
+[history]
+# why we persist
+persistence = "save-all" # keep
+
+# providers below
+[model_providers.openai]
+name = "OpenAI"
+
+[model_providers.azure]
+name = "Azure"
+base_url = "https://example.openai.azure.com/openai/v1"
+wire_api = "responses"

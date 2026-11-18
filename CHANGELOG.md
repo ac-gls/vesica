@@ -14,6 +14,8 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 - **Breaking (config):** the `core` profile has no repositories (plan §3). A repo whose `profiles` includes `core` is rejected. An empty `profiles` list now means developer and lead; previously it also included core.
 
 ### Fixed
+- TOML merge (`ah-config`) no longer drops comments when it replaces an existing value. The key's leading comment (including a file-header comment on the first key) and the value's inline comment are kept. It's covered by exact-byte and `insta` snapshot tests on realistic Codex/OpenCode configs.
+- `uninstall` now restores a managed file byte-for-byte when the original had no final newline (previously it safely refused and left the block in place). Restoration is proven by re-applying the install transform to the verified backup and comparing against the current bytes.
 - Repeat `install` no longer writes a new, unrecorded backup of a Vesica-created managed file (e.g. `~/.codex/AGENTS.md`) on every run.
 
 ### Added
