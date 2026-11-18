@@ -18,6 +18,8 @@
 - `lint --home-repo <path>` checks area README coverage, 1 MB file limit, internal wiki links, personal paths, heuristic email patterns (`VSH007`), credential patterns (`VSH006`), and policy-area frontmatter: valid YAML (`VSH008`), required fields including owner/tags (`VSH009`), allowed authority (`VSH010`), and required source for mirror/digest notes (`VSH011`). These rules apply within `Knowledge/`, `Decisions/`, and `Templates/`; area-root README files without frontmatter are tolerated for compatibility, and template-variable fields must conform to valid YAML (not skipped wholesale). Findings are secret-safe; heuristics do not constitute complete DLP/policy enforcement.
 - `vault-scan --path <directory>` flags common credential patterns by path and line without printing matched values.
 
+If something refuses or fails, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
 ## Build and test locally
 
 Prerequisites: Rust toolchain from `rust-toolchain.toml`, Git, and a local shared-home directory containing `AGENTS.md` and a valid `agent-home.toml`. The fixture is suitable for tests only.

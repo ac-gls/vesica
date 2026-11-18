@@ -1,0 +1,80 @@
+name: release
+
+# Plan §5.5: tag vX.Y.Z[-pre] -> static x86_64 musl build -> tarball + SHA256SUMS -> GitHub Release,
+# then bootstrap from the published release on each supported distro and run S7/S8 against it.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Build release artifact
+        run: bash scripts/build-release.sh "$GITHUB_REF_NAME" dist
+      - name: Release notes from CHANGELOG
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > dist/NOTES.md
+          [ -s dist/NOTES.md ] || { echo "CHANGELOG.md has no section for [$version]" >&2; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: dist
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=()
+          case "$GITHUB_REF_NAME" in *-*) prerelease=(--prerelease) ;; esac
+          (cd dist && sha256sum -c SHA256SUMS)
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "Vesica $GITHUB_REF_NAME" --notes-file dist/NOTES.md "${prerelease[@]}" \
+            dist/vesica-*-x86_64-linux.tar.gz dist/SHA256SUMS
+
+  verify:
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bootstrap from the published release (download + checksum)
+        run: VESICA_VERSION="$GITHUB_REF_NAME" VESICA_BIN_DIR="$RUNNER_TEMP/bin" sh install.sh --bootstrap-only
+      - run: '"$RUNNER_TEMP/bin/vesica" --version'
+      - name: S7/S8 lifecycle against the released binary
+        env:
+          VESICA_BIN: ${{ runner.temp }}/bin/vesica
+          VESICA_REQUIRE_NATIVE: "1"
+          VESICA_EVIDENCE: ${{ runner.temp }}/release-evidence-${{ matrix.os }}.md
+        run: bash tests/lifecycle-linux.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-evidence-${{ matrix.os }}
+          path: ${{ runner.temp }}/release-evidence-${{ matrix.os }}.md

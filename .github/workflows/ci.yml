@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: shellcheck install.sh tests/install.sh tests/lifecycle-linux.sh scripts/content-guard.sh tests/content-guard.sh
+      - run: shellcheck install.sh tests/install.sh tests/lifecycle-linux.sh scripts/*.sh tests/content-guard.sh tests/release.sh
       - name: Installer integration tests
         run: bash tests/install.sh
 
@@ -61,6 +61,24 @@ jobs:
           tool: cargo-deny,cargo-audit
       - run: cargo deny --locked check
       - run: cargo audit --deny warnings
+
+  # Plan §5.5 / B8: a dry-run release builds the static musl artifact and checksums, installs it
+  # through install.sh, and runs the S7/S8 lifecycle against that exact binary.
+  release-dry-run:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Release build and artifact checks
+        run: bash tests/release.sh
+      - name: S7/S8 lifecycle against the musl release binary
+        env:
+          VESICA_BIN: target/x86_64-unknown-linux-musl/release/vesica
+          VESICA_REQUIRE_NATIVE: "1"
+          VESICA_EVIDENCE: ${{ runner.temp }}/lifecycle-evidence-musl.md
+        run: bash tests/lifecycle-linux.sh
 
   # Plan S7/S8: install/uninstall lifecycle and personal-vault/shared-home Git isolation on
   # GitHub-hosted Linux VMs (not containers or WSL). Evidence goes to the job summary and an artifact.

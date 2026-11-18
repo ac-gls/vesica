@@ -58,6 +58,13 @@ These are Linux/WSL development-container results. Installer fixtures simulate L
 8. Symlinks are created only at absent destinations or accepted if already correct; existing user destinations are never replaced.
 9. Secret scan output contains locations only. Scanner limits individual files to 2 MB and does not traverse symlinks.
 
+## Release
+
+`scripts/build-release.sh <tag>` builds the `x86_64-unknown-linux-musl` binary and checks that it's fully static: no `INTERP` segment and no `NEEDED` entries. It's static-PIE, which keeps ASLR; older `file` versions call that "dynamically linked". It also checks that the binary reports the tag's version. It packages `vesica-<tag>-x86_64-linux.tar.gz` reproducibly (commit timestamp, sorted entries, `gzip -n`) and writes `SHA256SUMS`. It refuses a tag that doesn't match the workspace version or `install.sh`'s default version.
+
+- CI `release-dry-run` runs `tests/release.sh` (artifact, checksum, static, bootstrap-install and mismatched-tag checks), then S7/S8 against the musl binary.
+- `.github/workflows/release.yml` runs on a `v*` tag: build, then a GitHub Release (a pre-release when the tag has a `-` suffix, with notes taken from that CHANGELOG section), then a `verify` job on Ubuntu 24.04 and 22.04 that bootstraps from the **published** release with `install.sh` and runs S7/S8 against that binary.
+
 ## Known limitations
 
 - `bash tests/lifecycle-linux.sh` (CI job `lifecycle`) exercises the real binary through bootstrap → doctor → dry-run → install → repeat install → refusal cases → uninstall, plus personal-vault/shared-home Git isolation and `team status/pull`, in a disposable HOME. In CI it runs on GitHub-hosted Ubuntu VMs with `VESICA_REQUIRE_NATIVE=1`; local WSL/container runs are labelled supplemental.

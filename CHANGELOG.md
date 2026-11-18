@@ -16,6 +16,9 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 - Content-free guard `scripts/content-guard.sh` and the `content-guard` CI job (plan §5.5 / B8), with tests that seed each violation.
 - `supply-chain` CI job: `cargo deny --locked check` and `cargo audit --deny warnings`. The licence allow-list is trimmed to the licences actually in use.
 
+- Release pipeline: `scripts/build-release.sh` (static musl artifact, reproducible tarball, `SHA256SUMS`, version consistency checks), the `release-dry-run` CI job, and `.github/workflows/release.yml` (tag → GitHub Release → verify by bootstrapping the published release and running S7/S8 on Ubuntu 24.04/22.04).
+- `docs/TROUBLESHOOTING.md`.
+
 ### Removed
 - `chrono` (RUSTSEC-2026-0543, unmaintained). Backup timestamps now use a small tested UTC formatter.
 - `serde_yaml` (deprecated) and its `unsafe-libyaml` dependency (RUSTSEC-2024-0449, unmaintained). Frontmatter lint uses `yaml-rust2`, with characterization tests pinning the previous semantics. The dependency graph went from 121 to 94 crates.
