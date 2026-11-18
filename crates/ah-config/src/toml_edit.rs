@@ -16,11 +16,21 @@ pub fn merge_toml(document: &str, patch: &Value) -> anyhow::Result<String> {
 
 fn merge_table(table: &mut Table, patch: &serde_json::Map<String, Value>) -> anyhow::Result<()> {
     for (key, value) in patch {
-        if let (Some(existing), Some(incoming)) = (table.get_mut(key), value.as_object()) {
-            if let Some(nested) = existing.as_table_mut() {
+        if let Some(existing) = table.get_mut(key) {
+            if let (Some(nested), Some(incoming)) = (existing.as_table_mut(), value.as_object()) {
                 merge_table(nested, incoming)?;
                 continue;
             }
+            // Replace in place: the key (and the comments before it) stays, and a replaced
+            // value keeps its surrounding whitespace and trailing comment.
+            match (existing.as_value_mut(), to_item(value)?) {
+                (Some(old), Item::Value(mut new)) => {
+                    *new.decor_mut() = old.decor().clone();
+                    *old = new;
+                }
+                (_, new) => *existing = new,
+            }
+            continue;
         }
         table.insert(key, to_item(value)?);
     }

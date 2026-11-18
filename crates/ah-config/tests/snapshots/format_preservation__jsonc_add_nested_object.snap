@@ -1,0 +1,18 @@
+---
+source: crates/ah-config/tests/format_preservation.rs
+expression: out
+---
+{
+  // user's OpenCode settings
+  "$schema": "https://opencode.ai/config.json",
+  /* block comment
+     spanning lines */
+  "theme": "tokyonight", // trailing comment
+  "provider": {
+    "anthropic": { "options": { "timeout": 600 } }, // keep
+    "azure": {
+      "enabled": false,
+    },
+  },
+  "instructions": ["~/old.md"],
+}

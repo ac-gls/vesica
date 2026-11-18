@@ -17,6 +17,7 @@ name = "ah-config"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "insta",
  "jsonc-parser",
  "serde_json",
  "tempfile",
