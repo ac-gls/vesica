@@ -4,6 +4,10 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+## [0.1.0-alpha.2] - 2026-11-18
+
+Second pre-release, still a prototype for disposable trials on native Linux x86_64. Adds `vesica update`, which installs a newer release of the app itself after verifying its checksum and reported version, and the vault primitives and `install --vault` from the previous unreleased work.
+
 ### Added
 - `vesica update` (plan §5.4): resolves a release (newest published, or `--tag`), downloads the tarball and `SHA256SUMS`, verifies the SHA-256, checks that the extracted binary reports the tag's version, replaces the binary atomically, then re-links from the recorded manifest. `--channel alpha` (default) includes pre-releases; `--channel stable` doesn't. `--dry-run` downloads and verifies but replaces nothing. Failures (checksum mismatch, missing checksum entry, wrong version) leave the installed binary untouched, and the staging directory is always removed.
   - The manifest now records the vault path, so a re-link after an update keeps `Team` where it is.
