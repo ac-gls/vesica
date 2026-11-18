@@ -280,6 +280,14 @@ printf '' >"$PV/.gitignore"
 refuse S8 "vault snapshot refuses when Team is not excluded" "not excluded" "$BIN" vault snapshot --path "$PV"
 check S8 "vault fix restores the Team exclusion" sh -c '"$1" vault fix --path "$2" | grep -q "added /Team" && "$1" vault snapshot --path "$2" >/dev/null && test -z "$(git -C "$2" ls-files -- Team)"' _ "$BIN" "$PV"
 
+# ---------------------------------------------------------------- S7: install step 3 (--vault, decision D-H)
+VH="$TMP/h-vault"; VV="$TMP/vault-step3"
+check S7 "install without --vault links ~/Team" sh -c '"$1" install --home-repo "$2" --root "$3" >/dev/null && test -L "$3/Team"' _ "$BIN" "$TMP/shared" "$VH"
+check S7 "install --vault creates the vault and links Team inside it" sh -c '"$1" install --home-repo "$2" --root "$3" --vault "$4" >"$5" && test -f "$4/AGENTS.md" && test -d "$4/.git" && test "$(readlink "$4/Team")" = "$(realpath "$2")"' _ "$BIN" "$TMP/shared" "$VH" "$VV" "$TMP/vault-install.out"
+check S7 "switching to --vault removed the unmodified ~/Team link" sh -c 'grep -q "^Removed stale link: $2/Team" "$1" && test ! -e "$2/Team" && test ! -L "$2/Team"' _ "$TMP/vault-install.out" "$VH"
+check S7 "config.env exports the vault and the vault check passes" bash --noprofile --norc -c '. "$1/.bashrc" && test "$EX_VAULT" = "$2" && "$3" vault check --path "$2" >/dev/null' _ "$VH" "$VV" "$BIN"
+check S7 "uninstall removes the vault Team link and keeps the vault" sh -c '"$1" uninstall --root "$2" >/dev/null && test ! -L "$3/Team" && test -f "$3/AGENTS.md" && test -d "$3/.git"' _ "$BIN" "$VH" "$VV"
+
 if command -v git-lfs >/dev/null 2>&1; then LFS="git-lfs present ($(git lfs version | cut -d' ' -f1)); LFS behavior not in the fixture contract yet — not tested"
 else LFS="git-lfs absent; LFS not in the fixture contract yet — not tested"; fi
 

@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- Install step 3 (decision D-H): `install --vault <dir>` (or `VESICA_VAULT`).
+  - Creates the vault from the skeleton, or adopts an existing folder without overwriting anything.
+  - Links the shared home at `<vault>/Team` instead of `~/Team`. No link is made when the shared-home checkout already lives there.
+  - Exports `<PREFIX>_VAULT` and adds `@<vault>/AGENTS.md` to the Claude/Codex import block.
+  - Vault scaffolding runs only after every install refusal, and `uninstall` keeps the vault.
+- `install` removes symlinks recorded by an earlier install that it no longer plans (for example `~/Team` after switching to `--vault`), but only when they still point where Vesica put them. A link the user changed is kept and released from the manifest.
 - `vesica vault init|fix|check|new-note|snapshot` (plan §5.1, §5.6, D30). The personal-vault skeleton and the ledger-note template are embedded from `assets/`.
   - `init` creates a vault in an absent or empty directory.
   - `fix` adopts an existing folder: it adds only what's missing, never overwrites, and makes sure `/Team` is ignored.

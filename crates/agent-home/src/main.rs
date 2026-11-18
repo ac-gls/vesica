@@ -71,6 +71,12 @@ struct InstallOptions {
         help = "Clone missing profile repositories into this directory (developer/lead profiles)"
     )]
     repos_dir: Option<PathBuf>,
+    #[arg(
+        long,
+        env = "VESICA_VAULT",
+        help = "Create or adopt this personal vault and link the shared home at <vault>/Team"
+    )]
+    vault: Option<PathBuf>,
 }
 #[derive(Debug, clap::Args)]
 struct VaultScanOptions {
@@ -251,30 +257,82 @@ fn lint(path: &Path) -> Result<()> {
     anyhow::bail!("{} lint finding(s)", findings.len())
 }
 
+/// Remove symlinks recorded by an earlier install that this install no longer plans (for example
+/// `~/Team` after switching to `--vault`). A link is removed only if it still points exactly where
+/// Vesica put it; a link the user changed is left in place and released from the manifest.
+fn prune_stale_links(cfg: &Path, plan: &ah_core::Plan, dry: bool) -> Result<()> {
+    let manifest_path = cfg.join("manifest.json");
+    let mut manifest = ah_core::Manifest::load(&manifest_path)?;
+    let planned: std::collections::BTreeSet<&str> =
+        plan.actions.iter().map(ah_core::Action::key).collect();
+    let stale: Vec<String> = manifest
+        .entries
+        .iter()
+        .filter(|(key, entry)| entry.kind == "symlink" && !planned.contains(key.as_str()))
+        .map(|(key, _)| key.clone())
+        .collect();
+    let mut changed = false;
+    for key in stale {
+        let entry = &manifest.entries[&key];
+        let target = Path::new(&entry.target);
+        let current = std::fs::read_link(target).ok().map(|link| {
+            if link.is_absolute() {
+                link
+            } else {
+                target.parent().unwrap_or(Path::new(".")).join(link)
+            }
+        });
+        let expected = entry.source.as_deref().map(PathBuf::from);
+        if current.is_some() && current == expected {
+            if dry {
+                println!("Would remove stale link: {key}");
+                continue;
+            }
+            std::fs::remove_file(target)?;
+            println!("Removed stale link: {key}");
+        } else if std::fs::symlink_metadata(target).is_err() {
+            println!("Forgot missing stale link: {key}");
+        } else {
+            println!("Kept modified stale link: {key} (no longer managed by Vesica)");
+        }
+        if !dry {
+            manifest.entries.remove(&key);
+            changed = true;
+        }
+    }
+    if changed {
+        manifest.save_atomic(&manifest_path)?;
+    }
+    Ok(())
+}
+
+fn print_vault_changes(changes: &[ah_vault::personal::VaultChange], dry: bool) -> bool {
+    use ah_vault::personal::VaultChange;
+    let mut any = false;
+    for change in changes {
+        let line = match (change, dry) {
+            (VaultChange::Kept(name), _) => format!("Kept existing: {name}"),
+            (VaultChange::Create(name), true) => format!("Would create: {name}"),
+            (VaultChange::Create(name), false) => format!("Created: {name}"),
+            (VaultChange::ExcludeTeam, true) => "Would update: .gitignore (add /Team)".into(),
+            (VaultChange::ExcludeTeam, false) => "Updated: .gitignore (added /Team)".into(),
+            (VaultChange::GitInit, true) => "Would initialise a Git repository".into(),
+            (VaultChange::GitInit, false) => "Initialised a Git repository".into(),
+        };
+        any |= !matches!(change, VaultChange::Kept(_));
+        println!("{line}");
+    }
+    any
+}
+
 fn utc_date() -> String {
     let stamp = utc_stamp(std::time::SystemTime::now());
     format!("{}-{}-{}", &stamp[0..4], &stamp[4..6], &stamp[6..8])
 }
 
 fn vault(command: VaultCommand) -> Result<()> {
-    use ah_vault::personal::{self, VaultChange};
-    let print_changes = |changes: &[VaultChange], dry: bool| {
-        let mut any = false;
-        for change in changes {
-            let line = match (change, dry) {
-                (VaultChange::Kept(name), _) => format!("Kept existing: {name}"),
-                (VaultChange::Create(name), true) => format!("Would create: {name}"),
-                (VaultChange::Create(name), false) => format!("Created: {name}"),
-                (VaultChange::ExcludeTeam, true) => "Would update: .gitignore (add /Team)".into(),
-                (VaultChange::ExcludeTeam, false) => "Updated: .gitignore (added /Team)".into(),
-                (VaultChange::GitInit, true) => "Would initialise a Git repository".into(),
-                (VaultChange::GitInit, false) => "Initialised a Git repository".into(),
-            };
-            any |= !matches!(change, VaultChange::Kept(_));
-            println!("{line}");
-        }
-        any
-    };
+    use ah_vault::personal;
+    let print_changes = print_vault_changes;
     match command {
         VaultCommand::Init { vault, dry_run } => {
             let changes = personal::init(&vault.path, &utc_date(), dry_run)?;
@@ -488,7 +546,25 @@ fn install(o: InstallOptions) -> Result<()> {
     if !shared.join("AGENTS.md").is_file() {
         anyhow::bail!("shared home must contain AGENTS.md: {}", shared.display());
     }
-    let import = format!("@{}", shared.join("AGENTS.md").display());
+    // Install step 3 (D-H): with --vault the shared home is linked at <vault>/Team instead of
+    // ~/Team, unless the shared-home checkout already lives there (plan step 4 layout).
+    let vault = match &o.vault {
+        Some(dir) => Some(
+            std::path::absolute(dir)
+                .with_context(|| format!("cannot resolve --vault {}", dir.display()))?,
+        ),
+        None => None,
+    };
+    let team_link = vault
+        .as_ref()
+        .map_or_else(|| home.join("Team"), |v| v.join("Team"));
+    let team_in_place = vault.is_some()
+        && !team_link.is_symlink()
+        && team_link.canonicalize().ok().as_ref() == Some(&shared);
+    let mut import = format!("@{}", shared.join("AGENTS.md").display());
+    if let Some(vault) = &vault {
+        import.push_str(&format!("\n@{}", vault.join("AGENTS.md").display()));
+    }
     let profile = ah_agents::ProfileSelection::from_name(&c, selected)?;
     // Install step 2: config.env exports the team variables; ~/.bashrc sources it. Both are
     // managed blocks, so backups, modified-file refusal and exact uninstall apply unchanged.
@@ -499,17 +575,23 @@ fn install(o: InstallOptions) -> Result<()> {
         shell_export(prefix, "HOME", path_text(&shared)?)?,
         shell_export(prefix, "PROFILE", selected)?,
     ];
+    if let Some(vault) = &vault {
+        exports.push(shell_export(prefix, "VAULT", path_text(vault)?)?);
+    }
     if let (false, Some(dir)) = (profile.profile == ah_core::Profile::Core, &o.repos_dir) {
         let dir = std::path::absolute(dir)
             .with_context(|| format!("cannot resolve --repos-dir {}", dir.display()))?;
         exports.push(shell_export(prefix, "REPOS", path_text(&dir)?)?);
     }
     let env_path = shell_quote(path_text(&config_env)?)?;
-    let actions = vec![
-        ah_core::Action::Symlink {
+    let mut actions = Vec::new();
+    if !team_in_place {
+        actions.push(ah_core::Action::Symlink {
             source: shared.to_string_lossy().into_owned(),
-            destination: home.join("Team").to_string_lossy().into_owned(),
-        },
+            destination: team_link.to_string_lossy().into_owned(),
+        });
+    }
+    actions.extend([
         ah_core::Action::UpsertBlock {
             path: home
                 .join(".claude/CLAUDE.md")
@@ -537,7 +619,7 @@ fn install(o: InstallOptions) -> Result<()> {
             name: "vesica".into(),
             body: format!("if [ -f {env_path} ]; then . {env_path}; fi"),
         },
-    ];
+    ]);
     let mut planner = ah_core::Planner::new();
     for a in actions {
         planner.push(a)?
@@ -680,6 +762,29 @@ fn install(o: InstallOptions) -> Result<()> {
             }
         }
     }
+    // Vault scaffolding runs only after every refusal above. It is personal data: never
+    // overwritten, not recorded in the manifest, and kept by uninstall (like cloned repositories).
+    if let Some(vault) = &vault {
+        let adopt = std::fs::read_dir(vault).is_ok_and(|mut entries| entries.next().is_some());
+        let date = utc_date();
+        let changes = if adopt {
+            ah_vault::personal::fix(vault, &date, o.dry_run)?
+        } else {
+            ah_vault::personal::init(vault, &date, o.dry_run)?
+        };
+        println!(
+            "Vault: {} ({})",
+            vault.display(),
+            if adopt { "adopting" } else { "creating" }
+        );
+        print_vault_changes(&changes, o.dry_run);
+        if team_in_place {
+            println!(
+                "Team: the shared home is already at {} (no link needed)",
+                team_link.display()
+            );
+        }
+    }
     let mut pending_backups = Vec::new();
     let backups = if o.dry_run {
         std::collections::BTreeMap::new()
@@ -807,6 +912,7 @@ fn install(o: InstallOptions) -> Result<()> {
     for (a, r) in plan.actions.iter().zip(&outcomes) {
         println!("{r:?}: {}", a.key())
     }
+    prune_stale_links(&cfg, &plan, o.dry_run)?;
     if o.dry_run {
         match &repo_plan {
             Err(message) => println!("{message}"),

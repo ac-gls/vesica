@@ -22,7 +22,8 @@ vesica CLI
   │                   untracked, and if a file to be committed matches a secret pattern (D30)
 
 shared-home checkout
-  ├─ AGENTS.md                         → ~/Team symlink
+  ├─ AGENTS.md                         → ~/Team symlink, or <vault>/Team with --vault (install
+  │                                      step 3; vault created or adopted via ah-vault)
   ├─ AGENTS.md                         → managed import in Claude and Codex files
   ├─ agent-home.toml team.env_prefix   → ~/.config/agent-home/config.env (<P>_HOME, <P>_PROFILE,
   │                                      <P>_REPOS for developer/lead with --repos-dir), sourced
