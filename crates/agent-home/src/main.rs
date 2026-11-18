@@ -29,6 +29,8 @@ enum Command {
     NewSkill(NewSkillOptions),
     /// Plan copying Standards/* into opted-in code repositories
     SyncStandards(SyncStandardsOptions),
+    /// Promote a personal note into the shared home as a reviewed PR
+    Share(ShareOptions),
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ProfileArg {
@@ -121,6 +123,43 @@ struct TeamOptions {
 enum TeamCommand {
     Status(TeamStatusOptions),
     Pull(TeamPullOptions),
+}
+#[derive(Debug, clap::Args)]
+struct ShareOptions {
+    /// Personal note to promote (must be inside the vault)
+    note: PathBuf,
+    #[command(flatten)]
+    options: Options,
+    #[arg(long, env = "AGENT_HOME_ROOT", env = "VESICA_ROOT")]
+    root: Option<PathBuf>,
+    #[arg(long, help = "Destination area under Knowledge/ in the shared home")]
+    area: Option<String>,
+    #[arg(long, help = "Promote into Decisions/ instead of Knowledge/<area>")]
+    decisions: bool,
+    #[arg(
+        long,
+        help = "Owner recorded in the promoted note frontmatter (default: your Git name)"
+    )]
+    owner: Option<String>,
+    #[arg(
+        long,
+        help = "Confirm: apply the promotion. Without it the plan is printed and nothing is written"
+    )]
+    yes: bool,
+    #[arg(
+        long = "move",
+        help = "Remove the personal note once the promotion is committed"
+    )]
+    move_source: bool,
+    #[arg(
+        long,
+        help = "Convert links that cannot resolve in the shared home to plain text"
+    )]
+    drop_unresolved_links: bool,
+    #[arg(long, help = "Push the branch and open the PR (needs gh auth)")]
+    open_pr: bool,
+    #[arg(long)]
+    dry_run: bool,
 }
 #[derive(Debug, clap::Args)]
 struct SyncStandardsOptions {
@@ -270,6 +309,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Update(o) => update(o),
         Command::NewSkill(o) => new_skill(o),
         Command::SyncStandards(o) => sync_standards(o),
+        Command::Share(o) => share(o),
         Command::Team(o) => match o.command {
             TeamCommand::Status(options) => team_status(&required_team_path(options.path)?),
             TeamCommand::Pull(options) => team_pull(&required_team_path(options.path)?),
@@ -624,6 +664,154 @@ fn sync_standards(o: SyncStandardsOptions) -> Result<()> {
     println!(
         "Dry run: {planned} file(s) would change, {unchanged} already match; nothing was written."
     );
+    Ok(())
+}
+
+/// The person's Git author name, used as the promoted note's `owner`.
+fn git_author_name(shared: &Path) -> Result<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(shared)
+        .args(["var", "GIT_AUTHOR_IDENT"])
+        .output()
+        .context("starting git to read your Git identity")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "cannot read your Git identity; set `git config --global user.name` or pass --owner"
+        );
+    }
+    let ident = String::from_utf8_lossy(&out.stdout);
+    ident
+        .split(" <")
+        .next()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .context("your Git identity has no name; pass --owner")
+}
+
+/// `vesica share` (plan §5.4, D26, S9): promote a personal note into the shared home.
+///
+/// Nothing is written without `--yes`: that is the person's confirmation step, and cancelling
+/// before it leaves no trace. The whole promotion happens on a `share/<note>` branch, the local
+/// checks (lint and vault-scan) gate the commit, and a failed gate rolls the branch back.
+fn share(o: ShareOptions) -> Result<()> {
+    use ah_vault::share::{self, ShareRequest};
+    let vault = root(o.root.as_deref())?;
+    let shared = o.options.home_repo.canonicalize().with_context(|| {
+        format!(
+            "shared-home path does not exist: {}",
+            o.options.home_repo.display()
+        )
+    })?;
+    let destination_dir = match (&o.area, o.decisions) {
+        (Some(area), false) => {
+            let safe = !area.is_empty()
+                && !area.starts_with(['/', '.'])
+                && area
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ' ' | '/'));
+            if !safe {
+                anyhow::bail!("--area must be a name under Knowledge/ (letters, digits, '-', '_', '/' and spaces)");
+            }
+            format!("Knowledge/{area}")
+        }
+        (None, true) => "Decisions".to_owned(),
+        _ => anyhow::bail!("exactly one of --area <name> or --decisions is required"),
+    };
+    let mut request = ShareRequest {
+        vault: &vault,
+        shared: &shared,
+        note: &o.note,
+        destination_dir: &destination_dir,
+        owner: "",
+        drop_unresolved_links: o.drop_unresolved_links,
+    };
+    // Validate the note, the destination and the checkout before asking Git for an identity, so a
+    // refusal never depends on local Git configuration.
+    let plan = share::plan(&request)?;
+    let owner = match &o.owner {
+        Some(owner) => owner.clone(),
+        None => git_author_name(&shared)?,
+    };
+    request.owner = &owner;
+    let confirm = o.yes && !o.dry_run;
+    println!(
+        "{}: {} -> {}",
+        if confirm { "Promoting" } else { "Would create" },
+        plan.source_rel,
+        plan.destination_rel
+    );
+    println!("Branch: {} (new; trunk is never written)", plan.branch);
+    for field in &plan.additions {
+        let value = match *field {
+            "owner" => owner.as_str(),
+            _ => "working",
+        };
+        println!("  frontmatter: {field} = {value}");
+    }
+    for (from, to) in &plan.link_rewrites {
+        println!("  link rewrite: [[{from}]] -> [[{to}]] (Team/ prefix is the vault view)");
+    }
+    for link in &plan.dropped_links {
+        println!("  would drop unresolvable link [[{link}]] and keep the text");
+    }
+    for rewrite in &plan.rewrites {
+        println!(
+            "  {}: [[{}]] -> [[{}]]",
+            rewrite.file, rewrite.from, rewrite.to
+        );
+    }
+    if !confirm {
+        println!(
+            "Nothing was written. Re-run with --yes to apply{}.",
+            if o.dry_run {
+                ""
+            } else {
+                ", or --dry-run for a preview only"
+            }
+        );
+        return Ok(());
+    }
+    let message = format!(
+        "share/{}: promote the personal note into {destination_dir}",
+        Path::new(&plan.source_rel)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("note")
+    );
+    let applied = share::apply(&request, &plan, &message, o.move_source)?;
+    println!("Committed: {} ({})", applied.commit, plan.branch);
+    if applied.rewrites_applied > 0 {
+        println!(
+            "Rewrote {} personal note(s) to link into the shared home",
+            applied.rewrites_applied
+        );
+    }
+    if applied.moved {
+        println!(
+            "Moved the personal note out of the vault: {}",
+            plan.source_rel
+        );
+    }
+    println!(
+        "The branch was not pushed. Next: git -C {} push -u origin {}, then `gh pr create --repo <owner>/<shared-home> --head {}` for review.",
+        shared.display(),
+        plan.branch,
+        plan.branch
+    );
+    if o.open_pr {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&shared)
+            .args(["push", "-u", "origin", &plan.branch])
+            .status()
+            .context("starting git push")?;
+        if !status.success() {
+            anyhow::bail!("git push failed; the commit is local on {}", plan.branch);
+        }
+        println!("Pushed {} (open the PR with `gh pr create`)", plan.branch);
+    }
     Ok(())
 }
 

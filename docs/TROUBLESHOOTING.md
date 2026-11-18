@@ -81,6 +81,21 @@ Findings print `path:line:rule: message` and never the offending text.
 | VSH014 | The skill's `name` doesn't match its folder name. |
 | VSH015 | The skill's `description` is missing or blank. |
 
+## `vesica share`
+
+| Message | Fix |
+|---|---|
+| `Nothing was written. Re-run with --yes to apply` | Expected: `share` only plans without `--yes`. |
+| `… is outside the vault …` | `share` only promotes notes inside your vault (set `--root` if the vault is elsewhere). |
+| `… is missing a valid YAML frontmatter block` | Give the note `title, created, updated, type, area, tags` (see the vault contract). |
+| `link [[…]] would point outside the shared home` | The link would break inside the team repo. Fix it, or pass `--drop-unresolved-links` to keep just its text. |
+| `<shared>: has no Knowledge/<area>` | Create that area in the shared home first (it needs a `README.md`). |
+| `… already exists in the shared home` | The note is already there. Edit the shared copy, or pick another note. |
+| `… has uncommitted changes; commit or stash them before sharing` | Your shared-home checkout is dirty; Vesica won't mix your edits into the promotion commit. |
+| `branch share/<note> already exists` | A previous attempt left the branch. Delete it (`git branch -D share/<note>`) or finish the PR. |
+| `shared-home lint failed (…)` / `vault-scan found … credential pattern(s)` | The gate blocked the commit and the branch was rolled back. Fix the note, then rerun. |
+| `cannot read your Git identity; … or pass --owner` | Set `git config --global user.name`, or pass `--owner`. |
+
 ## `vesica sync-standards`
 
 | Message | Meaning / fix |
