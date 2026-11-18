@@ -235,3 +235,31 @@ fn new_skill_works_on_a_standalone_checkout_without_committing() {
         .stdout(predicate::str::contains("not a Git repository"));
     assert!(root.join("Agents/Skills/plain-skill/SKILL.md").is_file());
 }
+
+#[test]
+fn a_failed_commit_leaves_no_branch_and_no_scaffold_file() {
+    // The commit-failure path is otherwise unreachable, so force it with a failing hook.
+    let fixture = SharedFixture::new();
+    let hooks = fixture.root.join(".git/hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    std::fs::write(hooks.join("pre-commit"), "#!/bin/sh\nexit 1\n").unwrap();
+    let mut perms = std::fs::metadata(hooks.join("pre-commit"))
+        .unwrap()
+        .permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(hooks.join("pre-commit"), perms).unwrap();
+
+    new_skill(&fixture.root, "hooked", &[]).failure();
+    assert_eq!(fixture.git(&["branch", "--show-current"]).trim(), "main");
+    assert!(
+        !fixture
+            .git(&["branch", "--list", "skill/hooked"])
+            .contains("skill/hooked"),
+        "the branch must be deleted"
+    );
+    assert!(
+        !fixture.root.join("Agents/Skills/hooked").exists(),
+        "the untracked scaffold must not be left behind"
+    );
+    assert_eq!(fixture.status(), "");
+}

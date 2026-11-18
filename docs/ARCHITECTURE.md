@@ -11,6 +11,9 @@ vesica CLI
   ├─ update   resolve a release (or --tag), curl the tarball + SHA256SUMS, verify the SHA-256 and
   │           that the binary reports the tag's version, rename it into place, re-link from the
   │           recorded manifest; staging is always removed and failures leave the binary alone
+  ├─ share    person-confirmed promotion of a personal note into the shared home: plan only
+  │           without --yes; branch share/<note>; rewrite vault-view links; add owner/authority;
+  │           lint + vault-scan gate with full rollback; never writes trunk, never pushes
   ├─ sync-standards  --dry-run plans Standards/* -> <repo>/.github/instructions/*.instructions.md
   │                  for repos with `standards = true`; writes nothing
   ├─ new-skill scaffold Agents/Skills/<name>/SKILL.md on a new skill/<name> branch (committed,
@@ -60,6 +63,22 @@ shared-home checkout
 `repos[].standards` (boolean, default `false`) is the per-repo opt-in for `vesica sync-standards` (decision D-I).
 
 The TOML schema validates the document after conversion to JSON (for example with Taplo's `#:schema` directive). `crates/ah-core/tests/schema_parity.rs` is the contract: every corpus case must get the same verdict from `AgentHomeConfig::parse`/`FoundryCatalog::parse` and from the schema (validated with `boon`, a dev-only dependency). A rule changed in one place and not the other fails CI.
+
+## Promotion (`share`)
+
+`vesica share` is the only path by which personal content reaches the team's shared home, and it is
+always person-invoked (plan §5.6, D26). The properties that matter:
+
+- **Confirmation.** `--yes` is required to write anything; without it the command prints the plan.
+- **No trunk writes.** Everything happens on `share/<note>`; a failed gate deletes the branch,
+  unstages, and removes the untracked note, so the checkout is left exactly as it was found.
+- **Links.** `[[Team/…]]` is the vault's view of the shared home, so promoting rewrites those links
+  to the shared-home path; a link that resolves nowhere in the shared home is refused unless
+  `--drop-unresolved-links` keeps its text. Inbound personal links to the promoted note become
+  `[[Team/…]]`.
+- **Gate.** `lint_shared_home` and `scan_secrets` run against the staged tree before the commit.
+- **Transport.** The command never pushes; `--open-pr` pushes the branch and leaves PR creation to
+  `gh`. Real submission is not exercised in tests.
 
 ## Git usage
 

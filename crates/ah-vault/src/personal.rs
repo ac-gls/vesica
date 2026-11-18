@@ -310,6 +310,22 @@ fn notes(vault: &Path) -> anyhow::Result<Vec<PathBuf>> {
     Ok(notes)
 }
 
+/// The YAML lines of a note's frontmatter block, or `None` when it is missing or unclosed.
+pub fn frontmatter_of(text: &str) -> Option<Vec<&str>> {
+    let mut lines = text.lines();
+    if lines.next().map(str::trim_end) != Some("---") {
+        return None;
+    }
+    let mut yaml = Vec::new();
+    for line in lines {
+        if line.trim_end() == "---" {
+            return Some(yaml);
+        }
+        yaml.push(line);
+    }
+    None
+}
+
 fn frontmatter_problem(text: &str) -> Option<(&'static str, usize, &'static str)> {
     use yaml_rust2::Yaml;
     let mut lines = text.lines();

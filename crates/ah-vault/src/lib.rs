@@ -1,6 +1,8 @@
 //! Vault safety utilities and personal vault workflows.
 
 pub mod personal;
+pub(crate) mod rollback;
+pub mod share;
 
 pub(crate) mod git;
 
@@ -381,6 +383,7 @@ pub fn new_skill(
     git::isolated(shared, &["checkout", "-q", "-b", &branch])?;
     let written = (|| -> anyhow::Result<()> {
         std::fs::create_dir_all(path.parent().unwrap_or(shared))?;
+        rollback::note_created(&path);
         std::fs::write(&path, body)?;
         git::isolated(shared, &["add", "--", &relative])?;
         git::user(
@@ -390,7 +393,10 @@ pub fn new_skill(
         Ok(())
     })();
     if written.is_err() {
-        // Leave the checkout as it was found rather than on a half-written branch.
+        // Leave the checkout exactly as it was found: no branch, no staged change and no
+        // untracked scaffold file (`git checkout -f` alone leaves untracked files behind).
+        let _ = git::isolated(shared, &["reset", "-q"]);
+        rollback::remove_created(shared, &path);
         let _ = git::isolated(shared, &["checkout", "-q", "-f", "-"]);
         let _ = git::isolated(shared, &["branch", "-D", &branch]);
     }

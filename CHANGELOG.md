@@ -5,6 +5,16 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Added
+- `vesica share <note> --area <name> | --decisions` (plan §5.4, D26, S9): promote a personal note into the shared home as a reviewed PR.
+  - **Nothing happens without `--yes`**: without it (or with `--dry-run`) the full plan prints and nothing is written, so cancelling before confirmation leaves no trace.
+  - The promotion happens on a **`share/<note>` branch**; trunk is never written and nothing is pushed (`--open-pr` pushes only when asked).
+  - **Links are handled, not assumed:** a `[[Team/…]]` link is the vault's view, so it's rewritten to the shared-home path; a link that cannot resolve in the shared home is refused, or converted to plain text with `--drop-unresolved-links`.
+  - Inbound links in personal notes that point at the promoted note are rewritten to `[[Team/…]]`.
+  - `owner` (your Git name, or `--owner`) and `authority: working` are added to the frontmatter when absent. `source` is only required for `mirror`/`digest` notes, so a promoted note doesn't need it.
+  - `lint` and `vault-scan` gate the commit. A failed gate rolls the branch back **and removes the staged note**, leaving the checkout exactly as it was.
+  - `--move` removes the personal note after the commit succeeds; by default it's kept.
+
+### Added
 - `vesica sync-standards --dry-run` (plan §5.4), with the per-repo opt-in being **`standards = true`** on a `[[repos]]` entry in `agent-home.toml` (decision D-I). It plans copying each `Standards/*.md` into an opted-in checkout as `.github/instructions/<name>.instructions.md`, reporting `Would create`, `Would update` or `unchanged` per file, and never writes anything. Repos that aren't opted in or aren't cloned are reported and skipped. Anything but `--dry-run` refuses, because opening the PRs needs separate approval.
   - `schemas/agent-home.schema.json` documents the flag, and the parser/schema parity corpus covers it (`standards` must be a boolean).
 

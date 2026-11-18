@@ -293,6 +293,29 @@ check S7 "switching to --vault removed the unmodified ~/Team link" sh -c 'grep -
 check S7 "config.env exports the vault and the vault check passes" bash --noprofile --norc -c '. "$1/.bashrc" && test "$EX_VAULT" = "$2" && "$3" vault check --path "$2" >/dev/null' _ "$VH" "$VV" "$BIN"
 check S7 "uninstall removes the vault Team link and keeps the vault" sh -c '"$1" uninstall --root "$2" >/dev/null && test ! -L "$3/Team" && test -f "$3/AGENTS.md" && test -d "$3/.git"' _ "$BIN" "$VH" "$VV"
 
+# ---------------------------------------------------------------- S9: share (person-confirmed promotion)
+SH="$TMP/s9/shared"; SV="$TMP/s9/vault"
+mkdir -p "$TMP/s9" "$SV/Inbox"
+cp -a "$ROOT/tests/fixtures/shared-home" "$SH"
+git -C "$SH" init -q -b main && git -C "$SH" add -A && git -C "$SH" commit -q -m initial
+cat >"$SV/Inbox/proposal.md" <<'NOTE'
+---
+title: "Cache proposal"
+created: 2026-01-02
+updated: 2026-01-02
+type: note
+area: general
+tags: [architecture]
+---
+See [[Team/Standards/coding-standards]] for the rules.
+NOTE
+check S9 "share without confirmation writes nothing" sh -c '"$1" share "$2/Inbox/proposal.md" --home-repo "$3" --root "$2" --area Architecture >"$4" && grep -q "Nothing was written" "$4" && test ! -e "$3/Knowledge/Architecture/proposal.md" && test -z "$(git -C "$3" branch --list share/proposal)" && test "$(git -C "$3" rev-parse --abbrev-ref HEAD)" = main' _ "$BIN" "$SV" "$SH" "$TMP/s9/plan.out"
+check S9 "share promotes on a branch with owner and authority" sh -c '"$1" share "$2/Inbox/proposal.md" --home-repo "$3" --root "$2" --area Architecture --yes >"$4" && test "$(git -C "$3" rev-parse --abbrev-ref HEAD)" = share/proposal && grep -q "owner: " "$3/Knowledge/Architecture/proposal.md" && grep -q "authority: working" "$3/Knowledge/Architecture/proposal.md"' _ "$BIN" "$SV" "$SH" "$TMP/s9/apply.out"
+check S9 "share rewrote the vault-view link for the shared home" grep -q '\[\[Standards/coding-standards\]\]' "$SH/Knowledge/Architecture/proposal.md"
+check S9 "share left trunk untouched" sh -c '! git -C "$1" log main --format=%s | grep -q "^share/" && test "$(git -C "$1" rev-list --count main)" = 1' _ "$SH"
+refuse S9 "share refuses an existing destination" "already exists" "$BIN" share "$SV/Inbox/proposal.md" --home-repo "$SH" --root "$SV" --area Architecture --yes
+check S9 "the refusal left the branch and the note as they were" sh -c 'test "$(git -C "$1" status --porcelain)" = "" && test "$(git -C "$1" rev-parse --abbrev-ref HEAD)" = share/proposal' _ "$SH"
+
 if command -v git-lfs >/dev/null 2>&1; then LFS="git-lfs present ($(git lfs version | cut -d' ' -f1)); LFS behavior not in the fixture contract yet — not tested"
 else LFS="git-lfs absent; LFS not in the fixture contract yet — not tested"; fi
 
