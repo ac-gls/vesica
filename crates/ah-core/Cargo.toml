@@ -17,4 +17,5 @@ toml.workspace = true
 ah-config.workspace = true
 
 [dev-dependencies]
+boon = "0.6"
 tempfile.workspace = true
