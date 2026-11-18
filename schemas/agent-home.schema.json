@@ -41,8 +41,8 @@
         },
         "env_prefix": {
           "type": "string",
-          "pattern": "^[A-Za-z0-9_]+$",
-          "description": "Prefix for generated environment variables (e.g. <PREFIX>_HOME)."
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "description": "Prefix for generated shell variables (<PREFIX>_HOME, <PREFIX>_PROFILE, <PREFIX>_REPOS); must not start with a digit."
         },
         "role_prefix": {
           "type": "string",

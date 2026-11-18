@@ -89,14 +89,15 @@ impl AgentHomeConfig {
                 anyhow::bail!("required configuration field {field} is empty");
             }
         }
-        if config
-            .team
-            .env_prefix
-            .chars()
-            .any(|c| !c.is_ascii_alphanumeric() && c != '_')
+        // The prefix names shell variables (`<PREFIX>_HOME`), so it must start like one.
+        let prefix = &config.team.env_prefix;
+        if prefix.starts_with(|c: char| c.is_ascii_digit())
+            || prefix
+                .chars()
+                .any(|c| !c.is_ascii_alphanumeric() && c != '_')
         {
             anyhow::bail!(
-                "team.env_prefix must contain only ASCII letters, digits, and underscores"
+                "team.env_prefix must contain only ASCII letters, digits, and underscores, and must not start with a digit"
             );
         }
         for repo in &config.repos {
