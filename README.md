@@ -1,34 +1,47 @@
 # Vesica
 
-Vesica's target is a content-free installer/tool: team content lives in a separate shared GitHub repository, while each developer's personal vault stays private. Shared changes are intended to arrive by reviewable pull request. This is the target architecture, not the current implementation.
+Vesica is a content-free installer and CLI that gives every developer the same AI-agent setup:
+team rules, shared skills and repository pointers come from a separate, private **shared home**
+repository, and each developer's personal vault stays private. This repository holds only the
+tool. The CI content guard keeps team content out of it.
 
-The current prototype supports a **Linux x86_64** bootstrap and local shared-home checkout workflows. It does not yet clone/bootstrap the shared repository, perform `vesica share`, create contribution branches or PRs, or install the full team setup shown in the architecture plan. Native Linux is required; Windows/WSL integration is optional and not a prerequisite.
+> **Pre-release prototype (`v0.1.0-alpha.1`).** Validated on native Linux x86_64 (Ubuntu 24.04
+> and 22.04). Only some of the target architecture is built: no shared-home bootstrap, no `vesica share`,
+> no Foundry, Herdr or Hermes integration, and only Claude Code and Codex instruction wiring.
+> **Do not use it on your real home directory yet.** Try it with a disposable `--root`.
+
+## Quick start (disposable trial)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ac-gls/vesica/v0.1.0/install.sh \
-  | sh -s -- --home-repo <owner>/<shared-home> --profile developer
-vesica doctor
+# Install the binary only (downloads the release and verifies SHA256SUMS; no sudo).
+curl -fsSL https://raw.githubusercontent.com/ac-gls/vesica/v0.1.0-alpha.1/install.sh | sh -s -- --bootstrap-only
+
+# Point at a local checkout of your team's shared home and a throwaway root.
+SHARED=/path/to/shared-home-checkout
+TRIAL=$(mktemp -d)
+vesica doctor --home-repo "$SHARED"
+vesica install --home-repo "$SHARED" --root "$TRIAL" --dry-run
+vesica install --home-repo "$SHARED" --root "$TRIAL"   # add --repos-dir DIR to clone developer/lead repos
+vesica status --root "$TRIAL"
+vesica uninstall --root "$TRIAL"
 ```
 
-# Team checkout Git status and pull
+## What works today
 
-```bash
-vesica team status --path /path/to/shared-home
-vesica team pull --path /path/to/shared-home
-```
+| Command | Does |
+|---|---|
+| `doctor` | Read-only Linux preflight: platform, required `git`/`gh`/`curl`/`sha256sum`, optional `az`/`node`, shared-home config. Blockers exit non-zero. |
+| `install` | Links the shared home and its skills, adds managed import blocks to Claude Code and Codex instruction files, and (with `--repos-dir`) clones missing developer/lead repositories. Never overwrites; refuses on any unmanaged destination. |
+| `status` / `uninstall` | Reports, or removes and restores, only what Vesica can prove it created. Originals are restored byte-for-byte. |
+| `team status` / `team pull` | Local status of a shared-home checkout (no fetch); fast-forward-only pull that refuses dirty or divergent checkouts. The path comes from `--path` or `VESICA_TEAM_HOME`. |
+| `lint` / `vault-scan` | Read-only shared-home policy lint and a heuristic credential scan. Findings never echo content. |
 
-`status` reads local refs only and never fetches. `pull` fetches the configured upstream and fast-forwards only a clean checkout; it refuses uncommitted changes and non-fast-forward histories. The checkout path can also be provided with `VESICA_TEAM_HOME`. This does not yet implement shared-home bootstrap, `vesica share`, branch/PR creation, or the complete human-mediated contribution workflow.
+## Docs
 
-Finding output includes relative paths, line numbers and rule IDs; it deliberately omits document contents and matched credential text. The linter is heuristic and does not establish production readiness.
-
-Nothing is overwritten: supported installer changes are limited to managed imports and symlinks recorded in
-`~/.config/agent-home/manifest.json`. Uninstall verifies recorded content and preserves entries it cannot
-safely verify. This remains a prototype; see the onboarding and architecture notes before trying it.
-
-See [docs/ONBOARDING.md](docs/ONBOARDING.md) for the current safe local trial procedure and
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for implemented behavior and scope gaps. Do not use this prototype on a real user profile yet.
-
-The bootstrap can be exercised locally with `bash tests/install.sh`. It builds a fixture release tarball and checks bootstrap-only installation, safe argument forwarding, and checksum rejection without leaving an installed binary behind. CI runs this suite alongside ShellCheck; it does not download or publish a real release.
+- [ONBOARDING](docs/ONBOARDING.md): current behavior, compatibility names, local build and test.
+- [TROUBLESHOOTING](docs/TROUBLESHOOTING.md): every refusal message, with its cause and fix.
+- [ARCHITECTURE](docs/ARCHITECTURE.md): crates, safety model, CI, release and known limitations.
+- [CHANGELOG](CHANGELOG.md)
 
 ## License
 
