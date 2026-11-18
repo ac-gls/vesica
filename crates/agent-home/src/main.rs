@@ -343,6 +343,21 @@ fn install(o: InstallOptions) -> Result<()> {
     }
     let import = format!("@{}", shared.join("AGENTS.md").display());
     let profile = ah_agents::ProfileSelection::from_name(&c, selected)?;
+    // Install step 2: config.env exports the team variables; ~/.bashrc sources it. Both are
+    // managed blocks, so backups, modified-file refusal and exact uninstall apply unchanged.
+    // The vault variable is added with install step 3 (vault primitives).
+    let config_env = cfg.join("config.env");
+    let prefix = &c.team.env_prefix;
+    let mut exports = vec![
+        shell_export(prefix, "HOME", path_text(&shared)?)?,
+        shell_export(prefix, "PROFILE", selected)?,
+    ];
+    if let (false, Some(dir)) = (profile.profile == ah_core::Profile::Core, &o.repos_dir) {
+        let dir = std::path::absolute(dir)
+            .with_context(|| format!("cannot resolve --repos-dir {}", dir.display()))?;
+        exports.push(shell_export(prefix, "REPOS", path_text(&dir)?)?);
+    }
+    let env_path = shell_quote(path_text(&config_env)?)?;
     let actions = vec![
         ah_core::Action::Symlink {
             source: shared.to_string_lossy().into_owned(),
@@ -362,6 +377,18 @@ fn install(o: InstallOptions) -> Result<()> {
             style: "hash".into(),
             name: "vesica".into(),
             body: import,
+        },
+        ah_core::Action::UpsertBlock {
+            path: config_env.to_string_lossy().into_owned(),
+            style: "hash".into(),
+            name: "vesica".into(),
+            body: exports.join("\n"),
+        },
+        ah_core::Action::UpsertBlock {
+            path: home.join(".bashrc").to_string_lossy().into_owned(),
+            style: "hash".into(),
+            name: "vesica".into(),
+            body: format!("if [ -f {env_path} ]; then . {env_path}; fi"),
         },
     ];
     let mut planner = ah_core::Planner::new();
@@ -677,6 +704,10 @@ fn install(o: InstallOptions) -> Result<()> {
             }
         }
     }
+    println!(
+        "Shell environment: {} (sourced from ~/.bashrc; open a new shell to load it)",
+        config_env.display()
+    );
     println!("Partial wiring: Claude and Codex only; other harnesses are not yet wired.");
     if !clone_failures.is_empty() {
         anyhow::bail!(
@@ -686,6 +717,28 @@ fn install(o: InstallOptions) -> Result<()> {
     }
     Ok(())
 }
+/// `export <PREFIX>_<NAME>='<value>'`, single-quoted for POSIX shells.
+fn shell_export(prefix: &str, name: &str, value: &str) -> Result<String> {
+    Ok(format!("export {prefix}_{name}={}", shell_quote(value)?))
+}
+
+fn shell_quote(value: &str) -> Result<String> {
+    // A line break would split the managed block, and NUL cannot appear in a shell word.
+    if value.contains(['\n', '\r', '\0']) {
+        anyhow::bail!("{value:?} contains a line break or NUL and cannot be written to config.env");
+    }
+    Ok(format!("'{}'", value.replace('\'', r"'\''")))
+}
+
+fn path_text(path: &Path) -> Result<&str> {
+    path.to_str().with_context(|| {
+        format!(
+            "{} is not valid UTF-8 and cannot be written to config.env",
+            path.display()
+        )
+    })
+}
+
 /// UTC timestamp for backup file names, e.g. `20261118T145742.064527354Z`.
 fn utc_stamp(time: std::time::SystemTime) -> String {
     let since_epoch = time

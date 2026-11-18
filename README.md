@@ -31,7 +31,7 @@ vesica uninstall --root "$TRIAL"
 | Command | Does |
 |---|---|
 | `doctor` | Read-only Linux preflight: platform, required `git`/`gh`/`curl`/`sha256sum`, optional `az`/`node`, shared-home config. Blockers exit non-zero. |
-| `install` | Links the shared home and its skills, adds managed import blocks to Claude Code and Codex instruction files, and (with `--repos-dir`) clones missing developer/lead repositories. Never overwrites; refuses on any unmanaged destination. |
+| `install` | Links the shared home and its skills, adds managed import blocks to Claude Code and Codex instruction files, writes `~/.config/agent-home/config.env` (sourced from `~/.bashrc`), and (with `--repos-dir`) clones missing developer/lead repositories. Never overwrites; refuses on any unmanaged destination. |
 | `status` / `uninstall` | Reports, or removes and restores, only what Vesica can prove it created. Originals are restored byte-for-byte. |
 | `team status` / `team pull` | Local status of a shared-home checkout (no fetch); fast-forward-only pull that refuses dirty or divergent checkouts. The path comes from `--path` or `VESICA_TEAM_HOME`. |
 | `lint` / `vault-scan` | Read-only shared-home policy lint and a heuristic credential scan. Findings never echo content. |

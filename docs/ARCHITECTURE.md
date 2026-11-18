@@ -7,7 +7,7 @@ vesica CLI
   ├─ doctor   parse team config/catalog; Linux preflight (platform, required/optional commands,
   │           node minimum); blockers exit non-zero; WSL status informational; optional --json
   ├─ install  build a plan; preflight destinations/manifest; back up existing
-  │           Claude/Codex instruction files; execute supported actions; save manifest
+  │           Claude/Codex instruction files and ~/.bashrc; execute supported actions; save manifest
   ├─ status   read the install manifest and report recorded entries
   ├─ uninstall verify hashes/links, then remove or restore only managed entries
   ├─ team status/pull  inspect local shared-home refs / guarded fast-forward pull
@@ -17,6 +17,9 @@ vesica CLI
 shared-home checkout
   ├─ AGENTS.md                         → ~/Team symlink
   ├─ AGENTS.md                         → managed import in Claude and Codex files
+  ├─ agent-home.toml team.env_prefix   → ~/.config/agent-home/config.env (<P>_HOME, <P>_PROFILE,
+  │                                      <P>_REPOS for developer/lead with --repos-dir), sourced
+  │                                      by a managed block in ~/.bashrc
   └─ Agents/Skills/*/SKILL.md          → skill symlinks for .agents and Claude
 ```
 

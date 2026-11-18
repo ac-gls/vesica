@@ -27,6 +27,7 @@ rerun the same command; every command here is safe to repeat.
 | `WSL kernel: detected (informational …)` | Informational only. Native Linux is the supported platform. |
 | `Live harness, Foundry, Windows and Herdr checks are not implemented.` | Expected: those integrations are not built yet. |
 | `shared home must contain AGENTS.md` / config parse errors | `--home-repo` must point at a checkout of the team's shared home with a valid `agent-home.toml`. |
+| `team.env_prefix must contain only ASCII letters, digits, and underscores, and must not start with a digit` | The prefix names shell variables (`<PREFIX>_HOME`). Use something like `TEAM`. |
 | `repository … lists the core profile; the core profile has no repositories` | In `agent-home.toml`, list repos under `developer` and/or `lead`, or leave `profiles` empty for both. |
 | `repository name … must be a single directory name …` / `option-like url` / `forbidden git transport` | Fix that entry in `agent-home.toml`. Names are one safe directory name, and URLs are ordinary `https://`, `git@` or local paths. |
 
@@ -39,6 +40,8 @@ Always start with `--dry-run`. It prints the plan and changes nothing.
 | `unmanaged destination already exists: …` / `install stopped on an existing destination` | Something that Vesica didn't create already sits where it would put a link (for example `~/Team` or a skill link). Nothing was changed. | Move or rename that file yourself, then rerun. Vesica never overwrites it. |
 | State-path errors about `~/.config/agent-home` | The Vesica state directory or manifest path is a symlink or the wrong file type. | Inspect and repair the path, then rerun. |
 | `recorded backup was modified` / `is not a regular file` | A backup Vesica made earlier has changed since. Install refuses to trust it. | Check the named `*.vesica-backup-*` file. Restore it, or move it aside after you've checked what changed. |
+| `… contains a line break or NUL and cannot be written to config.env` / `… is not valid UTF-8 and cannot be written to config.env` | A path that would be exported (shared home, `--repos-dir`, or the home itself) can't be represented safely as a shell value. Nothing was changed. | Use a path without line breaks and with valid UTF-8 names. |
+| The `<PREFIX>_HOME` variables are not set after install | `~/.bashrc` is only read by new interactive shells. | Open a new terminal, or run `. ~/.config/agent-home/config.env`. Login shells that skip `~/.bashrc` need it sourced from `~/.profile`. |
 | `Repository cloning skipped: pass --repos-dir …` | Cloning is opt-in. | Add `--repos-dir ~/source/repos` (developer or lead profile). |
 | `Skipped: <repo> (destination exists and is not a Git checkout; left untouched)` | That folder already exists. | Vesica never touches it. Move it if you want Vesica to clone there. |
 | `Skipped: <repo> (existing checkout has a different origin (…))` | You already have a clone with a different remote (for example SSH versus HTTPS). | Nothing to do. Vesica leaves it alone. |
