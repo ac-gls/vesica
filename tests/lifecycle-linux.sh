@@ -122,9 +122,9 @@ refuse S7 "bootstrap refuses a non-x86_64 host" "only x86_64 is supported" \
 # ---------------------------------------------------------------- S7: doctor, dry-run, install, idempotence
 check S7 "doctor accepts the fixture shared home" "$BIN" doctor --home-repo "$TMP/shared"
 if "$BIN" doctor --json --home-repo "$TMP/shared" >"$TMP/doctor.json" 2>&1 \
-  && python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["shared_home"]=="valid"; [d[k] for k in ("profile","repos","foundry","herdr","live_harness")]; assert d["foundry"]=="not-implemented" and d["herdr"]=="not-implemented"' "$TMP/doctor.json"; then
-  pass S7 "doctor --json is valid and reports unimplemented integrations as not-implemented"
-else failc S7 "doctor --json is valid and reports unimplemented integrations as not-implemented" "$(head -c 160 "$TMP/doctor.json")"; fi
+  && python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["shared_home"]=="valid"; [d[k] for k in ("profile","repos","foundry","herdr","live_harness")]; assert d["foundry"]=="not-implemented" and d["herdr"]=="not-implemented"; assert d["status"]=="ok" and d["platform"]["os"]=="linux" and d["platform"]["arch"]=="x86_64" and d["blockers"]==[]' "$TMP/doctor.json"; then
+  pass S7 "doctor --json: Linux preflight ok, unimplemented integrations reported as not-implemented" "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["platform"]["distro"], "| optional:", d["prerequisites"]["optional"])' "$TMP/doctor.json")"
+else failc S7 "doctor --json: Linux preflight ok, unimplemented integrations reported as not-implemented" "$(head -c 160 "$TMP/doctor.json")"; fi
 
 H="$TMP/h"
 mkdir -p "$H/.claude" "$H/notes"

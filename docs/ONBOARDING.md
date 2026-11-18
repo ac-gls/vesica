@@ -8,6 +8,7 @@
 
 ## What currently works
 
+- `doctor` runs a read-only Linux preflight: platform (OS, architecture, distro, kernel), required commands `git`, `gh`, `curl` and `sha256sum` (a missing one is a blocker and makes `doctor` exit non-zero), and optional `az` and `node` (checked against the team's `minimum.node`). WSL detection is informational only.
 - `doctor --profile core|developer|lead` selects a profile; its JSON report lists repos assigned to that profile (empty `profiles` means shared across profiles). Install wiring does not yet apply profile-specific content.
 - `install --dry-run` prints the supported install plan without mutating the chosen home.
 - `install` links the local shared home at `~/Team` (or an explicit test root), adds managed imports to Claude Code and Codex instruction files, and links discovered skill directories to `.agents/skills` and `.claude/skills`.
