@@ -39,8 +39,9 @@ unset VESICA_HOME_REPO AGENT_HOME_REPO VESICA_ROOT AGENT_HOME_ROOT VESICA_TEAM_H
 PASSES=0
 FAILURES=0
 RESULTS=()
-pass() { PASSES=$((PASSES + 1)); RESULTS+=("| $1 | $2 | PASS | ${3:-} |"); printf 'PASS %s %s\n' "$1" "$2"; }
-failc() { FAILURES=$((FAILURES + 1)); RESULTS+=("| $1 | $2 | **FAIL** | ${3:-} |"); printf 'FAIL %s %s %s\n' "$1" "$2" "${3:-}" >&2; }
+cell() { printf '%s' "${1:-}" | tr '|' '/'; }
+pass() { PASSES=$((PASSES + 1)); RESULTS+=("| $1 | $2 | PASS | $(cell "${3:-}") |"); printf 'PASS %s %s\n' "$1" "$2"; }
+failc() { FAILURES=$((FAILURES + 1)); RESULTS+=("| $1 | $2 | **FAIL** | $(cell "${3:-}") |"); printf 'FAIL %s %s %s\n' "$1" "$2" "${3:-}" >&2; }
 # check <spike> <name> <command...>: pass if the command succeeds.
 check() { local s=$1 n=$2; shift 2; if "$@" >"$TMP/last.out" 2>&1; then pass "$s" "$n"; else failc "$s" "$n" "$(tr '\n' ' ' <"$TMP/last.out" | cut -c1-160)"; fi; }
 # refuse <spike> <name> <expected-text> <command...>: pass if the command fails and prints the text.
@@ -123,7 +124,7 @@ refuse S7 "bootstrap refuses a non-x86_64 host" "only x86_64 is supported" \
 check S7 "doctor accepts the fixture shared home" "$BIN" doctor --home-repo "$TMP/shared"
 if "$BIN" doctor --json --home-repo "$TMP/shared" >"$TMP/doctor.json" 2>&1 \
   && python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["shared_home"]=="valid"; [d[k] for k in ("profile","repos","foundry","herdr","live_harness")]; assert d["foundry"]=="not-implemented" and d["herdr"]=="not-implemented"; assert d["status"]=="ok" and d["platform"]["os"]=="linux" and d["platform"]["arch"]=="x86_64" and d["blockers"]==[]' "$TMP/doctor.json"; then
-  pass S7 "doctor --json: Linux preflight ok, unimplemented integrations reported as not-implemented" "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["platform"]["distro"], "| optional:", d["prerequisites"]["optional"])' "$TMP/doctor.json")"
+  pass S7 "doctor --json: Linux preflight ok, unimplemented integrations reported as not-implemented" "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["platform"]["distro"] + "; optional: " + ", ".join(k + "=" + v for k, v in d["prerequisites"]["optional"].items()))' "$TMP/doctor.json")"
 else failc S7 "doctor --json: Linux preflight ok, unimplemented integrations reported as not-implemented" "$(head -c 160 "$TMP/doctor.json")"; fi
 
 H="$TMP/h"
