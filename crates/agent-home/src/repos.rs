@@ -2,7 +2,8 @@
 //!
 //! Safety rules:
 //! - Opt-in: nothing happens without `--repos-dir`.
-//! - The `core` profile never clones (plan: repositories belong to `developer` and `lead`).
+//! - The `core` profile has no repositories (plan §3); config rejects `core` in a repo's
+//!   `profiles`, and an empty list means developer and lead.
 //! - An existing destination is never modified, whatever it contains; it is reported instead.
 //! - A clone goes into a temporary sibling directory and is renamed into place only after
 //!   `git clone` succeeds, so a failure leaves no partial checkout.

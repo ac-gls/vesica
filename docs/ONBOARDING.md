@@ -9,7 +9,7 @@
 ## What currently works
 
 - `doctor` runs a read-only Linux preflight: platform (OS, architecture, distro, kernel), required commands `git`, `gh`, `curl` and `sha256sum` (a missing one is a blocker and makes `doctor` exit non-zero), and optional `az` and `node` (checked against the team's `minimum.node`). WSL detection is informational only.
-- `doctor --profile core|developer|lead` selects a profile; its JSON report lists repos assigned to that profile (empty `profiles` means shared across profiles). Install wiring does not yet apply profile-specific content.
+- `doctor --profile core|developer|lead` selects a profile, and its JSON report lists the repos for that profile. Profiles nest: `core` is the vault, rules, skills, roles and model config, with **no repositories**. `developer` adds repositories (and Herdr, not yet implemented). `lead` adds Hermes (not yet implemented). In `agent-home.toml`, a repo's `profiles` may list `developer` and/or `lead`; an empty list means both, and listing `core` is rejected.
 - `install --dry-run` prints the supported install plan without mutating the chosen home, including `Would clone:` lines when `--repos-dir` is given.
 - `install --repos-dir <dir>` (developer/lead profiles) clones missing profile repositories. Existing destinations are never modified, and `uninstall` keeps the clones.
 - `install` links the local shared home at `~/Team` (or an explicit test root), adds managed imports to Claude Code and Codex instruction files, and links discovered skill directories to `.agents/skills` and `.claude/skills`.

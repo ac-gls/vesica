@@ -145,6 +145,11 @@ fn validate_repo(repo: &RepoConfig) -> anyhow::Result<()> {
     if lowered.starts_with("ext::") || lowered.starts_with("fd::") {
         anyhow::bail!("repository {name} uses a forbidden git transport");
     }
+    if repo.profiles.contains(&Profile::Core) {
+        anyhow::bail!(
+            "repository {name} lists the core profile; the core profile has no repositories (use developer and/or lead, or leave profiles empty for both)"
+        );
+    }
     Ok(())
 }
 
@@ -250,6 +255,13 @@ mod tests {
         for url in ["", "-uexploit", "ext::sh -c touch%20/tmp/x", "fd::3"] {
             assert!(with("ok", url).is_err(), "{url:?}");
         }
+        let core = AgentHomeConfig::parse(&format!(
+            "{base}[[repos]]\nname = \"r\"\nurl = \"https://example.invalid/r.git\"\nprofiles = [\"core\", \"lead\"]\n"
+        ))
+        .unwrap_err();
+        assert!(core
+            .to_string()
+            .contains("the core profile has no repositories"));
     }
 
     #[test]

@@ -11,10 +11,13 @@ pub struct ProfileSelection {
 }
 
 impl ProfileSelection {
+    /// Repositories for `profile` (plan §3): `core` has none; an empty `profiles` list means
+    /// every profile that has repositories (developer and lead).
     pub fn from_config(config: &ah_core::AgentHomeConfig, profile: Profile) -> Self {
         let repositories = config
             .repos
             .iter()
+            .filter(|_| profile != Profile::Core)
             .filter(|repo| repo.profiles.is_empty() || repo.profiles.contains(&profile))
             .cloned()
             .collect();
@@ -78,6 +81,20 @@ mod tests {
         .unwrap();
         let selected = ProfileSelection::from_config(&config, Profile::Core);
         assert!(selected.repositories.is_empty());
+        // An empty `profiles` list means developer and lead; core never has repositories.
+        let mut shared = config.clone();
+        shared.repos[0].profiles.clear();
+        assert!(ProfileSelection::from_config(&shared, Profile::Core)
+            .repositories
+            .is_empty());
+        for profile in [Profile::Developer, Profile::Lead] {
+            assert_eq!(
+                ProfileSelection::from_config(&shared, profile)
+                    .repositories
+                    .len(),
+                1
+            );
+        }
         let developer = ProfileSelection::from_config(&config, Profile::Developer);
         assert_eq!(
             developer
