@@ -77,7 +77,7 @@ impl Fixture {
     fn valid_note(&self, rel: &str) -> PathBuf {
         self.note(
             rel,
-            "---\ntitle: Cache strategy\ncreated: 2026-11-18\nupdated: 2026-11-18\ntype: note\narea: boostCX\ntags: [architecture]\n---\n# Cache strategy\n\nBody text.\n",
+            "---\ntitle: Cache strategy\ncreated: 2026-11-18\nupdated: 2026-11-18\ntype: note\narea: general\ntags: [architecture]\n---\n# Cache strategy\n\nBody text.\n",
         )
     }
 
@@ -218,7 +218,7 @@ fn share_can_promote_into_decisions_and_rewrites_inbound_personal_links() {
     let fixture = Fixture::new();
     fixture.note(
         "Decisions/cache-decision.md",
-        "---\ntitle: Cache decision\ncreated: 2026-11-18\nupdated: 2026-11-18\ntype: note\narea: boostCX\ntags: [decision]\n---\n# Cache decision\n",
+        "---\ntitle: Cache decision\ncreated: 2026-11-18\nupdated: 2026-11-18\ntype: note\narea: general\ntags: [decision]\n---\n# Cache decision\n",
     );
     // Two personal notes pointing at the promoted note, one unrelated.
     fixture.note(
@@ -308,7 +308,7 @@ fn share_refuses_a_link_that_would_not_resolve_inside_the_shared_home() {
     let fixture = Fixture::new();
     fixture.note(
         "Knowledge/Architecture/cache.md",
-        "---\ntitle: Cache strategy\ncreated: 2026-11-18\nupdated: 2026-11-18\ntype: note\narea: boostCX\ntags: [architecture]\n---\nSee [[my private scratch note]] and [[Team/Standards/coding-standards]].\n",
+        "---\ntitle: Cache strategy\ncreated: 2026-11-18\nupdated: 2026-11-18\ntype: note\narea: general\ntags: [architecture]\n---\nSee [[my private scratch note]] and [[Team/Standards/coding-standards]].\n",
     );
     let out = fixture
         .share(
@@ -376,7 +376,7 @@ fn share_gates_on_lint_and_vault_scan_and_leaves_nothing_behind() {
     let fixture = Fixture::new();
     fixture.note(
         "Knowledge/Architecture/leaky.md",
-        "---\ntitle: Leaky\ncreated: 2026-11-18\nupdated: 2026-11-18\ntype: note\narea: boostCX\ntags: [x]\n---\nWritten at /home/someone/notes.\n",
+        "---\ntitle: Leaky\ncreated: 2026-11-18\nupdated: 2026-11-18\ntype: note\narea: general\ntags: [x]\n---\nWritten at /home/someone/notes.\n",
     );
     fixture
         .share(
@@ -403,7 +403,7 @@ fn share_gates_on_lint_and_vault_scan_and_leaves_nothing_behind() {
     let key = format!("ghp_{}", "A".repeat(36));
     fixture.note(
         "Knowledge/Architecture/secret.md",
-        &format!("---\ntitle: Secret\ncreated: 2026-11-18\nupdated: 2026-11-18\ntype: note\narea: boostCX\ntags: [x]\n---\ntoken {key}\n"),
+        &format!("---\ntitle: Secret\ncreated: 2026-11-18\nupdated: 2026-11-18\ntype: note\narea: general\ntags: [x]\n---\ntoken {key}\n"),
     );
     fixture
         .share(

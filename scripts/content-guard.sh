@@ -27,7 +27,10 @@ finding() { FINDINGS=$((FINDINGS + 1)); printf 'content-guard: %s %s:%s %s\n' "$
 FILES="$(mktemp)"
 trap 'rm -f "$FILES"' EXIT
 if git -C "$ROOT" rev-parse --show-toplevel >/dev/null 2>&1 && [[ "$(git -C "$ROOT" rev-parse --show-toplevel)" == "$ROOT" ]]; then
-  git ls-files -z >"$FILES"
+  # Tracked files plus untracked (non-ignored) ones: a brand-new file must not slip past a
+  # local run just because it has not been staged yet.
+  # (The gitleaks rule below still scans Git history, which by definition excludes untracked files.)
+  git ls-files -z --cached --others --exclude-standard >"$FILES"
   MODE=git
 else
   find . -type f -not -path './.git/*' -not -path './target/*' -printf '%P\0' >"$FILES"

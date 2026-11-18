@@ -37,6 +37,13 @@ AWS_KEY="AKIA""Q2RSTUVWXYZ23456"
 fresh_copy
 expect_pass "clean tracked files"
 
+# In a Git checkout the scan covers untracked, non-ignored files too, so a brand-new source file
+# cannot slip past a local run before it is staged.
+fresh_copy
+git -C "$TMP/repo" init -q && git -C "$TMP/repo" add -A
+printf 'Contact the %s team.\n' "$ORG" >"$TMP/repo/brand-new.md"
+expect_fail "untracked new file in a Git checkout" "VCG001" "$ORG"
+
 fresh_copy; printf 'Contact the %s team.\n' "$ORG" >>"$TMP/repo/README.md"
 expect_fail "organisation name" "VCG001" "$ORG"
 
