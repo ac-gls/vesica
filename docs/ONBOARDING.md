@@ -28,7 +28,7 @@ cargo build -p vesica
 cargo run -p vesica -- --help
 ```
 
-The shell bootstrap also has network-free integration coverage: `bash tests/install.sh` creates a temporary fixture release and tests checksum validation and argument forwarding. Its checksum-failure case generates a dummy digest at runtime; no real secrets are used.
+The shell bootstrap also has network-free integration coverage: `bash tests/install.sh` creates a temporary fixture release and tests Linux host gating, checksum validation and argument forwarding. It needs an exec-capable temp directory; if `/tmp` is mounted `noexec`, set `VESICA_TEST_TMP_ROOT` to another directory. Its checksum-failure case generates a dummy digest at runtime; no real secrets are used.
 
 ## Safe local trial
 
@@ -53,6 +53,6 @@ A match prints only file and line, returns a non-zero exit, and intentionally do
 ## Current scope gaps
 
 - `lint --home-repo <path>` validates Knowledge/Decisions/Templates README coverage, 1 MB file limit, internal wiki links, personal paths and email-address patterns, and invokes the common-pattern credential scanner. Diagnostics contain relative paths, line numbers and stable rule IDs, never matched text. This is heuristic, not full vault-policy or DLP coverage.
-- The CLI does not yet perform a private team-home clone, profile-specific repository cloning/installation, per-profile skill selection (all discovered shared skills remain linked), complete OpenCode/Copilot/Hermes wiring, role-agent generation, Foundry setup/auth probes, Herdr orchestration, Windows interoperability, update, or signed release verification. Install actions and manifest commit now share a rollback transaction, but rollback is best-effort: intervening user edits are preserved and reported, and a rollback error may still leave partial state. Manifest commit uses a uniquely created temporary file; Unix temp permissions are restricted. Windows/WSL end-to-end behavior remains unvalidated. `doctor` explicitly says live harness, Foundry, Windows and Herdr checks are not implemented.
+- The CLI does not yet perform a private team-home clone, profile-specific repository cloning/installation, per-profile skill selection (all discovered shared skills remain linked), complete OpenCode/Copilot/Hermes wiring, role-agent generation, Foundry setup/auth probes, Herdr orchestration, Windows interoperability, update, or signed release verification. Install actions and manifest commit now share a rollback transaction, but rollback is best-effort: intervening user edits are preserved and reported, and a rollback error may still leave partial state. Manifest commit uses a uniquely created temporary file; Unix temp permissions are restricted. Native Linux x86_64 is the supported platform; Windows/WSL interoperability is optional and unvalidated. `doctor` explicitly says live harness, Foundry, Windows and Herdr checks are not implemented.
 
-Before a real pilot: resolve the private repo/org permissions and Foundry prerequisite, finish implementation and tests for the missing integrations, run dogfood on Windows+WSL with a disposable profile, verify CI/release artifacts, and obtain explicit release approval.
+Before a real pilot: resolve the private repo/org permissions and Foundry prerequisite, finish implementation and tests for the missing integrations, record native-Linux lifecycle evidence (plan S7/S8) and dogfood with a disposable Linux home/vault, verify CI/release artifacts, and obtain explicit release approval.
