@@ -188,6 +188,20 @@ check S7 "uninstall kept the personal note" sh -c 'grep -qx "personal note" "$1"
 snapshot "$TMP/shared" >"$TMP/shared.after"
 check S7 "shared-home content unchanged by the whole lifecycle" same "$TMP/shared.before" "$TMP/shared.after"
 
+# ---------------------------------------------------------------- S7: install step 10 (profile repositories)
+RR="$TMP/repo-remote.git"; RS="$TMP/repo-seed"; RSH="$TMP/shared-repos"; RH="$TMP/h-repos"; RD="$TMP/repos"
+git init -q --bare "$RR"
+git init -q "$RS" && printf 'app\n' >"$RS/README.md" && git -C "$RS" add -A && git -C "$RS" commit -q -m app && git -C "$RS" push -q "$RR" HEAD:main
+git -C "$RR" symbolic-ref HEAD refs/heads/main
+cp -a "$TMP/shared" "$RSH"
+sed -n '1,/^\[\[repos\]\]/p' "$TMP/shared/agent-home.toml" | sed '$d' >"$RSH/agent-home.toml"
+printf '[[repos]]\nname = "sample-app"\nurl = "%s"\nprofiles = ["developer", "lead"]\n' "$RR" >>"$RSH/agent-home.toml"
+check S7 "dry-run lists the planned clone without cloning" sh -c '"$1" install --home-repo "$2" --root "$3" --repos-dir "$4" --dry-run | grep -q "^Would clone: sample-app" && test ! -e "$4"' _ "$BIN" "$RSH" "$RH" "$RD"
+check S7 "install clones a missing profile repository" sh -c '"$1" install --home-repo "$2" --root "$3" --repos-dir "$4" | grep -q "^Cloned: sample-app" && test "$(git -C "$4/sample-app" config --get remote.origin.url)" = "$5"' _ "$BIN" "$RSH" "$RH" "$RD" "$RR"
+check S7 "repeat install leaves the cloned repository as Present" sh -c '"$1" install --home-repo "$2" --root "$3" --repos-dir "$4" | grep -q "^Present: sample-app"' _ "$BIN" "$RSH" "$RH" "$RD"
+check S7 "no temporary clone directories left" sh -c 'test "$(ls -A "$1")" = sample-app' _ "$RD"
+check S7 "uninstall keeps cloned repositories" sh -c '"$1" uninstall --root "$2" >/dev/null && test -f "$3/sample-app/README.md"' _ "$BIN" "$RH" "$RD"
+
 # ---------------------------------------------------------------- S8: personal vault / shared home Git isolation
 REMOTE="$TMP/s8/remote.git"; SEED="$TMP/s8/seed"; V="$TMP/s8/vault"; UP="$TMP/s8/upstream"
 mkdir -p "$TMP/s8"

@@ -364,7 +364,7 @@ profiles = []
             "install plan (profile: core; eligible repositories: core-only, shared-repo)",
         ))
         .stdout(predicate::str::contains(
-            "Repository cloning is not implemented",
+            "Repository cloning skipped: the core profile does not clone repositories",
         ));
 
     let manifest: serde_json::Value = serde_json::from_slice(
@@ -622,6 +622,178 @@ fn doctor_reports_node_below_the_team_minimum_without_blocking() {
     assert_eq!(
         report["prerequisites"]["optional"]["node"],
         "found: 22.15.0"
+    );
+}
+
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
+/// A shared home whose single repo `sample-app` points at `url`, plus a bare remote with one commit.
+struct RepoFixture {
+    temp: tempfile::TempDir,
+    shared: PathBuf,
+    remote: PathBuf,
+    repos: PathBuf,
+}
+impl RepoFixture {
+    fn new() -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let remote = temp.path().join("sample-app.git");
+        let seed = temp.path().join("seed");
+        run_git(temp.path(), ["init", "--bare", remote.to_str().unwrap()]);
+        run_git(temp.path(), ["init", "-b", "main", seed.to_str().unwrap()]);
+        run_git(&seed, ["config", "user.name", "Vesica Test"]);
+        run_git(&seed, ["config", "user.email", "vesica@example.invalid"]);
+        std::fs::write(seed.join("README.md"), "sample app\n").unwrap();
+        run_git(&seed, ["add", "README.md"]);
+        run_git(&seed, ["commit", "-m", "initial"]);
+        run_git(&seed, ["push", remote.to_str().unwrap(), "main"]);
+        run_git(&remote, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+        let fixture = Self {
+            shared: temp.path().join("shared"),
+            repos: temp.path().join("repos"),
+            remote,
+            temp,
+        };
+        fixture.write_config(fixture.remote.to_str().unwrap());
+        fixture
+    }
+    fn write_config(&self, url: &str) {
+        copy_tree(&fixture_home(), &self.shared);
+        let toml = std::fs::read_to_string(fixture_home().join("agent-home.toml")).unwrap();
+        let head = toml.split("[[repos]]").next().unwrap();
+        std::fs::write(
+            self.shared.join("agent-home.toml"),
+            format!("{head}[[repos]]\nname = \"sample-app\"\nurl = \"{url}\"\nprofiles = [\"developer\", \"lead\"]\n"),
+        )
+        .unwrap();
+    }
+    fn install(&self, extra: &[&str]) -> assert_cmd::assert::Assert {
+        Command::cargo_bin("vesica")
+            .unwrap()
+            .args(["install", "--home-repo"])
+            .arg(&self.shared)
+            .arg("--root")
+            .arg(self.temp.path().join("home"))
+            .arg("--repos-dir")
+            .arg(&self.repos)
+            .args(extra)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .assert()
+    }
+}
+
+#[test]
+fn install_clones_missing_profile_repositories_and_is_idempotent() {
+    let fixture = RepoFixture::new();
+    fixture
+        .install(&["--profile", "developer"])
+        .success()
+        .stdout(predicate::str::contains("Cloned: sample-app"));
+    let checkout = fixture.repos.join("sample-app");
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("README.md")).unwrap(),
+        "sample app\n"
+    );
+    let origin = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&checkout)
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&origin.stdout).trim(),
+        fixture.remote.to_str().unwrap()
+    );
+    let entries: Vec<_> = std::fs::read_dir(&fixture.repos)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        entries,
+        ["sample-app"],
+        "no temporary clone directories left"
+    );
+
+    fixture
+        .install(&["--profile", "developer"])
+        .success()
+        .stdout(predicate::str::contains("Present: sample-app"));
+}
+
+#[test]
+fn install_dry_run_lists_planned_clones_without_cloning() {
+    let fixture = RepoFixture::new();
+    fixture
+        .install(&["--profile", "lead", "--dry-run"])
+        .success()
+        .stdout(predicate::str::contains("Would clone: sample-app"));
+    assert!(!fixture.repos.exists());
+}
+
+#[test]
+fn install_core_profile_does_not_clone_repositories() {
+    let fixture = RepoFixture::new();
+    fixture
+        .install(&["--profile", "core"])
+        .success()
+        .stdout(predicate::str::contains(
+            "Repository cloning skipped: the core profile does not clone repositories",
+        ));
+    assert!(!fixture.repos.exists());
+}
+
+#[test]
+fn install_leaves_an_existing_repository_destination_untouched() {
+    let fixture = RepoFixture::new();
+    let destination = fixture.repos.join("sample-app");
+    std::fs::create_dir_all(&destination).unwrap();
+    std::fs::write(destination.join("mine.txt"), "user work\n").unwrap();
+    fixture
+        .install(&["--profile", "developer"])
+        .success()
+        .stdout(predicate::str::contains("Skipped: sample-app"));
+    assert_eq!(
+        std::fs::read_to_string(destination.join("mine.txt")).unwrap(),
+        "user work\n"
+    );
+    assert!(!destination.join(".git").exists());
+}
+
+#[test]
+fn install_reports_a_failed_clone_without_leaving_a_partial_checkout() {
+    let fixture = RepoFixture::new();
+    let missing = fixture.temp.path().join("no-such-remote.git");
+    fixture.write_config(missing.to_str().unwrap());
+    fixture
+        .install(&["--profile", "developer"])
+        .failure()
+        .stderr(predicate::str::contains("failed to clone sample-app"));
+    assert!(!fixture.repos.join("sample-app").exists());
+    let leftovers: Vec<_> = std::fs::read_dir(&fixture.repos)
+        .map(|it| it.map(|e| e.unwrap().file_name()).collect())
+        .unwrap_or_default();
+    assert!(
+        leftovers.is_empty(),
+        "temporary clone left behind: {leftovers:?}"
+    );
+    assert!(
+        fixture
+            .temp
+            .path()
+            .join("home/.config/agent-home/manifest.json")
+            .is_file(),
+        "managed configuration is installed even when a clone fails"
     );
 }
 

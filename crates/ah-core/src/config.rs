@@ -99,6 +99,9 @@ impl AgentHomeConfig {
                 "team.env_prefix must contain only ASCII letters, digits, and underscores"
             );
         }
+        for repo in &config.repos {
+            validate_repo(repo)?;
+        }
         Ok(config)
     }
 
@@ -117,6 +120,32 @@ impl FoundryCatalog {
     pub fn from_path(path: &Path) -> anyhow::Result<Self> {
         Self::parse(&fs::read_to_string(path)?)
     }
+}
+
+/// A repository entry becomes a directory name and a `git clone` argument, so keep both inert:
+/// a single safe path component, and a URL that cannot be read as an option or a
+/// command-executing transport (`ext::`, `fd::`).
+fn validate_repo(repo: &RepoConfig) -> anyhow::Result<()> {
+    let name = repo.name.as_str();
+    let safe_name = !name.is_empty()
+        && !name.starts_with(['.', '-'])
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if !safe_name {
+        anyhow::bail!(
+            "repository name {name:?} must be a single directory name of ASCII letters, digits, '.', '_' or '-', not starting with '.' or '-'"
+        );
+    }
+    let url = repo.url.trim();
+    if url.is_empty() || url.starts_with('-') {
+        anyhow::bail!("repository {name} has an empty or option-like url");
+    }
+    let lowered = url.to_ascii_lowercase();
+    if lowered.starts_with("ext::") || lowered.starts_with("fd::") {
+        anyhow::bail!("repository {name} uses a forbidden git transport");
+    }
+    Ok(())
 }
 
 fn is_credential_key(key: &str) -> bool {
@@ -196,6 +225,31 @@ mod tests {
         assert_eq!(config.profiles.default, Profile::Developer);
         assert_eq!(config.repos[0].name, "sample-app");
         assert!(config.repos[0].profiles.contains(&Profile::Lead));
+    }
+
+    #[test]
+    fn rejects_unsafe_repository_names_and_urls() {
+        let base = "schema = 1\n[team]\nname = \"T\"\norg = \"o\"\nenv_prefix = \"T\"\nrole_prefix = \"t-\"\n[profiles]\ndefault = \"developer\"\n";
+        let with = |name: &str, url: &str| {
+            AgentHomeConfig::parse(&format!(
+                "{base}[[repos]]\nname = \"{name}\"\nurl = \"{url}\"\n"
+            ))
+        };
+        assert!(with(
+            "sample-app",
+            "https://github.com/example-org/sample-app.git"
+        )
+        .is_ok());
+        assert!(with("sample.app_2", "git@github.com:example-org/x.git").is_ok());
+        for name in ["", ".", "..", "../evil", "a/b", ".hidden", "-flag"] {
+            assert!(
+                with(name, "https://example.invalid/r.git").is_err(),
+                "{name:?}"
+            );
+        }
+        for url in ["", "-uexploit", "ext::sh -c touch%20/tmp/x", "fd::3"] {
+            assert!(with("ok", url).is_err(), "{url:?}");
+        }
     }
 
     #[test]
