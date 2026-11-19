@@ -89,6 +89,7 @@ install_agents() {
   if command -v python3 >/dev/null 2>&1 && python3 -m venv "$HOME/venv" >"$WORK/pip.log" 2>&1 \
      && "$HOME/venv/bin/pip" install --quiet "$HERMES_PYPI_SPEC" >>"$WORK/pip.log" 2>&1; then
     AGENTS+=(hermes)
+    export PATH="$HOME/venv/bin:$PATH"
   else
     say "note: Hermes could not be installed here; it will be reported as blocked"
   fi
@@ -257,16 +258,17 @@ s2_probes() {
     fi
   done
 
-  # Hermes: skills.external_dirs + create_dir, rules from the working directory.
+  # Hermes: profile skills, shared skills via skills.external_dirs, rules from the working directory.
   if [ -n "$HERMES_BIN" ]; then
-    local hcfg="$HOME/.hermes/profiles/probe"
-    mkdir -p "$hcfg/skills"
-    add_skill "$hcfg/skills/probe-skill" probe-skill
+    export HERMES_HOME="$HOME/.hermes"
+    add_skill "$HERMES_HOME/skills/probe-default-skill" probe-default-skill
+    add_skill "$HERMES_HOME/profiles/probe/skills/probe-profile-skill" probe-profile-skill
     ( cd "$vault" && timeout 120 "$HERMES_BIN" skills list ) >"$WORK/hermes.out" 2>&1 || true
-    if grep -q 'probe-skill' "$WORK/hermes.out"; then
-      claim S2 "Hermes" 'skill discovery from a profile skills dir' VERIFIED "'hermes skills list' reports the fixture skill"
+    ( cd "$vault" && timeout 120 "$HERMES_BIN" --profile probe skills list ) >"$WORK/hermes-profile.out" 2>&1 || true
+    if grep -q 'probe-default-skill\|probe-profile-skill' "$WORK/hermes.out" "$WORK/hermes-profile.out" 2>/dev/null; then
+      claim S2 "Hermes" 'skill discovery from the Hermes home skills tree' VERIFIED "'hermes skills list' reports a seeded skill"
     else
-      claim S2 "Hermes" 'skill discovery from a profile skills dir' UNVERIFIED "not reported; first output line: $(cell "$(head -1 "$WORK/hermes.out")")"
+      claim S2 "Hermes" 'skill discovery from the Hermes home skills tree' UNVERIFIED "seeded skills not listed; the CLI reported: $(cell "$(head -3 "$WORK/hermes.out" | tr '\n' ' ')")"
     fi
   else
     claim S2 "Hermes" 'skill and rule discovery' NOT-APPLICABLE "hermes-agent could not be installed in the disposable environment"
@@ -371,8 +373,9 @@ fi
   printf '\n## Installed versions\n\n'
   for a in "${AGENTS[@]}"; do
     local_bin=$(agent_bin "$a")
+    [ "$a" = hermes ] && [ -n "$HERMES_BIN" ] && local_bin="$HERMES_BIN"
     if [ -n "$local_bin" ]; then
-      v=$(timeout 60 "$a" --version 2>&1 | head -1)
+      v=$(timeout 60 "$local_bin" --version 2>&1 | head -1)
       printf -- '- **%s** — `%s`\n' "$a" "$(cell "$v")"
     else
       printf -- '- **%s** — not installed\n' "$a"
