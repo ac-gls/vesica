@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: shellcheck install.sh tests/install.sh tests/lifecycle-linux.sh scripts/*.sh tests/content-guard.sh tests/release.sh
+      - run: shellcheck install.sh tests/install.sh tests/lifecycle-linux.sh tests/discovery-linux.sh scripts/*.sh tests/content-guard.sh tests/release.sh
       - name: Installer integration tests
         run: bash tests/install.sh
 

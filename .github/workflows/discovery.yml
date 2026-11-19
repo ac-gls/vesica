@@ -1,0 +1,57 @@
+name: discovery
+
+# Manual-only S2/S3 discovery run (plan §6 Phase 0). It is deliberately workflow_dispatch-only and
+# is NOT a required check: it observes how the supported agent CLIs discover instructions, skills
+# and role agents on a GitHub-hosted Ubuntu VM, in a disposable HOME, with no credentials and no
+# model calls. Findings feed the B6 role renderer. Evidence: job summary + artifact.
+on:
+  workflow_dispatch:
+    inputs:
+      strict:
+        description: Fail the run when a documented claim is not corroborated
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  s2-s3-discovery:
+    name: S2/S3 agent discovery (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    env:
+      VESICA_REQUIRE_NATIVE: "1"
+      VESICA_EVIDENCE: ${{ runner.temp }}/discovery-evidence.md
+      VESICA_EVIDENCE_JSON: ${{ runner.temp }}/discovery-evidence.json
+      VESICA_DISCOVERY_STRICT: ${{ inputs.strict && '1' || '0' }}
+      VESICA_DISCOVERY_TMP_ROOT: ${{ runner.temp }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host record
+        run: |
+          grep -E '^(PRETTY_NAME|VERSION_ID)=' /etc/os-release
+          uname -sr; uname -m; node --version; python3 --version
+          systemd-detect-virt || true
+      - name: Install probe tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq strace python3-venv >/dev/null
+          strace --version | head -1
+      - name: S2/S3 discovery
+        run: bash tests/discovery-linux.sh
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo '## S2/S3 agent discovery'
+            echo
+            if [ -f "$VESICA_EVIDENCE" ]; then cat "$VESICA_EVIDENCE"; else echo 'No evidence file was produced — the harness did not finish.'; fi
+          } >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s2-s3-discovery-evidence
+          path: |
+            ${{ runner.temp }}/discovery-evidence.md
+            ${{ runner.temp }}/discovery-evidence.json
+          if-no-files-found: warn
