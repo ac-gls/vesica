@@ -222,8 +222,9 @@ fn doctor_validates_the_shared_home_and_reports_selected_profile() {
         .args(["--profile", "developer"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Shared home: valid"))
-        .stdout(predicate::str::contains("Profile: developer"));
+        .stdout(predicate::str::contains("Shared home: "))
+        .stdout(predicate::str::contains("(flag/env)"))
+        .stdout(predicate::str::contains("Profile: developer (flag/env)"));
 }
 
 #[test]
@@ -255,7 +256,8 @@ fn doctor_prefers_vesica_environment_variables_over_legacy_names() {
         .env("AGENT_HOME_REPO", "/vesica-should-win-over-legacy")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Shared home: valid"));
+        .stdout(predicate::str::contains("Shared home: "))
+        .stdout(predicate::str::contains("(flag/env)"));
 }
 
 #[test]

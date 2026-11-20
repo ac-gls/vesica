@@ -1,9 +1,11 @@
 pub mod action;
 pub mod config;
+pub mod local;
 pub mod manifest;
 
 pub use action::{Action, ActionOutcome, Plan, Planner};
 pub use config::{AgentHomeConfig, FoundryCatalog, Profile, RepoConfig};
+pub use local::{LocalConfig, Source};
 pub use manifest::{Manifest, ManifestEntry};
 
 use serde::{Deserialize, Serialize};
