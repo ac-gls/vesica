@@ -36,6 +36,25 @@ pub struct LocalConfig {
     /// Machine-local repositories. Merged with the team list by name; see [`merge_repos`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<RepoConfig>,
+    /// How this machine tracks the shared home. Absent means no opinion (plan F11).
+    #[serde(default, skip_serializing_if = "HomeSection::is_empty")]
+    pub home: HomeSection,
+}
+
+/// The `[home]` table of the local config: the pin for the shared-home checkout (plan F11).
+/// Pinning is per consumer, so this is a machine fact, not a team one.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HomeSection {
+    /// The ref this machine pins, for example `"v10.5"`. `"main"` floats on purpose; absent
+    /// means the machine has not recorded a pin.
+    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+}
+
+impl HomeSection {
+    pub fn is_empty(&self) -> bool {
+        self.reference.is_none()
+    }
 }
 
 impl Default for LocalConfig {
@@ -47,6 +66,7 @@ impl Default for LocalConfig {
             vault: None,
             repos_dir: None,
             repos: Vec::new(),
+            home: HomeSection::default(),
         }
     }
 }
@@ -231,6 +251,28 @@ mod tests {
         assert_eq!((value, source), (Some("default"), Source::Default));
         let (value, source) = resolve::<&str>(None, None, None, None);
         assert_eq!((value, source), (None, Source::Default));
+    }
+
+    #[test]
+    fn the_home_table_carries_the_pin_and_rejects_a_bad_type() {
+        let parsed = LocalConfig::parse("schema = 1\n[home]\nref = \"v10.5\"\n").unwrap();
+        assert_eq!(parsed.home.reference.as_deref(), Some("v10.5"));
+        // Absent table and absent key are both "no pin", not an error.
+        assert!(LocalConfig::parse("schema = 1\n").unwrap().home.is_empty());
+        assert!(LocalConfig::parse("schema = 1\n[home]\n")
+            .unwrap()
+            .home
+            .is_empty());
+        // A pin must be a ref string.
+        assert!(LocalConfig::parse("schema = 1\n[home]\nref = 10\n").is_err());
+        // The pin survives a round trip through the file.
+        let written = parsed.to_toml().unwrap();
+        assert!(written.contains("[home]"), "{written}");
+        assert!(LocalConfig::parse(&written)
+            .unwrap()
+            .home
+            .reference
+            .is_some());
     }
 
     #[test]

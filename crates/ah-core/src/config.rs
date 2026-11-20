@@ -28,6 +28,10 @@ pub struct ProfilesConfig {
 pub struct MinimumConfig {
     pub herdr: Option<String>,
     pub node: Option<String>,
+    /// Oldest Vesica CLI this home works with (plan F11). An older CLI is blocked by `doctor`.
+    pub vesica: Option<String>,
+    /// Oldest home version this home's content is compatible with (plan F11).
+    pub home: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

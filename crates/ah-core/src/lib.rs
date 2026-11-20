@@ -2,6 +2,7 @@ pub mod action;
 pub mod config;
 pub mod local;
 pub mod manifest;
+pub mod version;
 
 pub use action::{Action, ActionOutcome, Plan, Planner};
 pub use config::{AgentHomeConfig, FoundryCatalog, Profile, RepoConfig};
