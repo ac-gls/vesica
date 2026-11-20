@@ -75,25 +75,54 @@ const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 struct ConfigOptions {
     #[command(subcommand)]
     command: ConfigCommand,
-    #[command(flatten)]
-    options: Options,
+    // These repeat two of `Options`' fields rather than flattening `Options`, so they can be
+    // `global`: a read-only diagnostic is naturally typed `vesica config list --root ...`, and
+    // clap would otherwise reject everything after the subcommand.
     #[arg(
         long,
+        global = true,
+        env = "AGENT_HOME_REPO",
+        env = "VESICA_HOME_REPO",
+        help = "Local team shared-home checkout (or set home_repo in the local config)"
+    )]
+    home_repo: Option<PathBuf>,
+    #[arg(long, global = true, value_enum, help = "Select a team profile")]
+    profile: Option<ProfileArg>,
+    #[arg(
+        long,
+        global = true,
         env = "AGENT_HOME_ROOT",
         env = "VESICA_ROOT",
         help = "Machine root to read the local config from"
     )]
     root: Option<PathBuf>,
-    #[arg(long, env = "VESICA_VAULT", help = "Explicit personal-vault path")]
+    #[arg(
+        long,
+        global = true,
+        env = "VESICA_VAULT",
+        help = "Explicit personal-vault path"
+    )]
     vault: Option<PathBuf>,
     #[arg(
         long,
+        global = true,
         env = "VESICA_REPOS_DIR",
         help = "Explicit repositories directory"
     )]
     repos_dir: Option<PathBuf>,
-    #[arg(long, help = "Emit the resolved configuration as JSON")]
+    #[arg(long, global = true, help = "Emit the resolved configuration as JSON")]
     json: bool,
+}
+
+impl ConfigOptions {
+    /// The shared `Options` shape the resolver takes, so these fields keep a single precedence
+    /// path and `config` cannot drift from what `install` does.
+    fn as_options(&self) -> Options {
+        Options {
+            home_repo: self.home_repo.clone(),
+            profile: self.profile,
+        }
+    }
 }
 #[derive(Debug, clap::Subcommand)]
 enum ConfigCommand {
@@ -1055,9 +1084,10 @@ fn prof(
 /// F9: read-only view of the configuration Vesica resolves, naming the layer behind every value.
 /// Nothing here writes — `config set` is deliberately not implemented yet (plan: read-only first).
 fn config(o: &ConfigOptions) -> Result<()> {
-    let resolved = resolve_home_repo(&o.options, o.root.as_deref())?;
+    let options = o.as_options();
+    let resolved = resolve_home_repo(&options, o.root.as_deref())?;
     let (c, _) = load(&resolved.home_repo, &resolved.local)?;
-    let (profile, profile_source) = prof(&o.options, &resolved.local, &c);
+    let (profile, profile_source) = prof(&options, &resolved.local, &c);
     let (vault, vault_source) =
         ah_core::local::resolve(o.vault.clone(), resolved.local.vault.clone(), None, None);
     let (repos_dir, repos_dir_source) = ah_core::local::resolve(
