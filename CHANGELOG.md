@@ -4,7 +4,32 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+## [0.1.0-alpha.4] - 2026-11-20
+
+Fourth pre-release, still a prototype for disposable trials on native Linux x86_64. It adds the
+machine-local configuration layer and the versioning surface: the shared home and the project
+repositories become configuration properties rather than flags, and a machine can pin the home with
+both sides checking that they agree.
+
 ### Added
+- Machine-local configuration (plan F8): `<root>/.config/agent-home/config.toml` holds `home_repo`,
+  `profile`, `vault`, `repos_dir` and machine-local `[[repos]]`. Values resolve in a fixed order —
+  command-line flag, environment variable, the local file, the team `agent-home.toml`, then the
+  built-in default — and `doctor` prints the layer behind the shared home and the profile, so a
+  surprising value can be traced. `install` persists what it resolved, so later commands need no
+  flag. A local repository entry replaces the team entry of the same name, and local-only entries are
+  appended: one repository is one entry. Reuses the team file's repository validation and its
+  credential-like-key guard.
+- `vesica config list|get` (plan F9): read-only view of every resolved value with the layer that
+  supplied it, plus `--json` (`{key: {value, source}}`). `config set` is not implemented yet (read-only first).
+- Versioning surface (plan F11): the local config gains a `[home]` table with `ref` — pin a release
+  (`v10.5`) or float a branch (`main`); the shared home's `[minimum]` gains `vesica` and `home`.
+  `doctor` **blocks** when the running CLI is older than `[minimum] vesica`, or when the checkout is
+  older than `[minimum] home`, naming both versions and what to do. `install` refuses a checkout that
+  is not at the pin and records the ref it installed from as `home_ref`; `team pull` will not move a
+  pinned checkout; `status` reports drift informationally, counting **local** tags only and never
+  fetching. A release pin requires the checkout to be *at* that release, a floating pin requires the
+  *branch*, and a requirement that cannot be parsed is never a blocker.
 - Agent wiring (plan §5.2 / F3.4): **OpenCode** and **Copilot CLI** join Claude Code and Codex.
   - OpenCode: `instructions` is merged into `~/.config/opencode/opencode.json` (JSONC), preserving comments, formatting and the user's own entries — the merge adds only missing paths and is idempotent.
   - Copilot CLI: `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` is exported from `config.env` with the shared home (and the vault, with `--vault`). The name is fixed by Copilot, so it doesn't take the team's env prefix.
@@ -14,6 +39,9 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 - Lifecycle coverage for all of the above (4 checks).
 
 ### Fixed
+- `vesica config`'s options were rejected after the subcommand (`config list --root <dir>` failed with
+  "unexpected argument"), because clap requires a parent's options to precede its subcommand. They are
+  now global, so either order works.
 - `MergeJsonc`/`MergeToml` actions were recorded as manifest kind `file`, which install's own preflight and `uninstall` rejected: any install that merged a JSON/TOML file could not be reinstalled or uninstalled. Found by the OpenCode wiring's idempotence test.
 
 ## [0.1.0-alpha.3] - 2026-11-18

@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "ah-agents"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "ah-core",
  "anyhow",
@@ -14,7 +14,7 @@ dependencies = [
 
 [[package]]
 name = "ah-config"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "anyhow",
  "insta",
@@ -26,7 +26,7 @@ dependencies = [
 
 [[package]]
 name = "ah-core"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "ah-config",
  "anyhow",
@@ -39,11 +39,11 @@ dependencies = [
 
 [[package]]
 name = "ah-herdr"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 
 [[package]]
 name = "ah-vault"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "anyhow",
  "regex",
@@ -54,7 +54,7 @@ dependencies = [
 
 [[package]]
 name = "ah-wsl"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "anyhow",
 ]
@@ -1068,7 +1068,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vesica"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "ah-agents",
  "ah-config",
