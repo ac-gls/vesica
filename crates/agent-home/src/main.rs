@@ -31,6 +31,8 @@ enum Command {
     SyncStandards(SyncStandardsOptions),
     /// Promote a personal note into the shared home as a reviewed PR
     Share(ShareOptions),
+    /// Show the configuration Vesica resolves and the layer behind each value
+    Config(ConfigOptions),
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ProfileArg {
@@ -65,6 +67,40 @@ struct DoctorOptions {
     options: Options,
     #[arg(long, help = "Emit the doctor report as JSON")]
     json: bool,
+}
+#[derive(Debug, clap::Args)]
+struct ConfigOptions {
+    #[command(subcommand)]
+    command: ConfigCommand,
+    #[command(flatten)]
+    options: Options,
+    #[arg(
+        long,
+        env = "AGENT_HOME_ROOT",
+        env = "VESICA_ROOT",
+        help = "Machine root to read the local config from"
+    )]
+    root: Option<PathBuf>,
+    #[arg(long, env = "VESICA_VAULT", help = "Explicit personal-vault path")]
+    vault: Option<PathBuf>,
+    #[arg(
+        long,
+        env = "VESICA_REPOS_DIR",
+        help = "Explicit repositories directory"
+    )]
+    repos_dir: Option<PathBuf>,
+    #[arg(long, help = "Emit the resolved configuration as JSON")]
+    json: bool,
+}
+#[derive(Debug, clap::Subcommand)]
+enum ConfigCommand {
+    /// Every resolved value and the layer that supplied it
+    List,
+    /// One resolved value and the layer that supplied it
+    Get {
+        /// team, home_repo, profile, vault, repos_dir or repos
+        key: String,
+    },
 }
 #[derive(Debug, clap::Args)]
 struct InstallOptions {
@@ -310,6 +346,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::NewSkill(o) => new_skill(o),
         Command::SyncStandards(o) => sync_standards(o),
         Command::Share(o) => share(o),
+        Command::Config(o) => config(&o),
         Command::Team(o) => match o.command {
             TeamCommand::Status(options) => team_status(&required_team_path(options.path)?),
             TeamCommand::Pull(options) => team_pull(&required_team_path(options.path)?),
@@ -994,6 +1031,107 @@ fn prof(
         Some("developer"),
     );
     (value.unwrap_or("developer"), source)
+}
+/// F9: read-only view of the configuration Vesica resolves, naming the layer behind every value.
+/// Nothing here writes — `config set` is deliberately not implemented yet (plan: read-only first).
+fn config(o: &ConfigOptions) -> Result<()> {
+    let resolved = resolve_home_repo(&o.options, o.root.as_deref())?;
+    let (c, _) = load(&resolved.home_repo, &resolved.local)?;
+    let (profile, profile_source) = prof(&o.options, &resolved.local, &c);
+    let (vault, vault_source) =
+        ah_core::local::resolve(o.vault.clone(), resolved.local.vault.clone(), None, None);
+    let (repos_dir, repos_dir_source) = ah_core::local::resolve(
+        o.repos_dir.clone(),
+        resolved.local.repos_dir.clone(),
+        None,
+        None,
+    );
+    let repo_names: Vec<&str> = c.repos.iter().map(|repo| repo.name.as_str()).collect();
+    // A merged list is a team fact plus, when the machine adds entries, a local one.
+    let repos_source = if resolved.local.repos.is_empty() {
+        "team"
+    } else {
+        "team + config.toml"
+    };
+    let rows: Vec<(&str, String, &str)> = vec![
+        ("team", format!("{} ({})", c.team.name, c.team.org), "team"),
+        (
+            "home_repo",
+            resolved.home_repo.display().to_string(),
+            resolved.source.as_str(),
+        ),
+        ("profile", profile.to_owned(), profile_source.as_str()),
+        (
+            "vault",
+            path_or_unset(&vault),
+            path_source(&vault, vault_source),
+        ),
+        (
+            "repos_dir",
+            path_or_unset(&repos_dir),
+            path_source(&repos_dir, repos_dir_source),
+        ),
+        (
+            "repos",
+            if repo_names.is_empty() {
+                "(none)".to_owned()
+            } else {
+                repo_names.join(", ")
+            },
+            repos_source,
+        ),
+    ];
+    let wanted: Vec<(&str, String, &str)> = match &o.command {
+        ConfigCommand::List => rows,
+        ConfigCommand::Get { key } => {
+            let found: Vec<_> = rows
+                .into_iter()
+                .filter(|(name, _, _)| name == key)
+                .collect();
+            if found.is_empty() {
+                anyhow::bail!(
+                    "unknown configuration key {key:?}; try one of: team, home_repo, profile, vault, repos_dir, repos"
+                );
+            }
+            found
+        }
+    };
+    if o.json {
+        let mut map = serde_json::Map::new();
+        for (name, value, source) in wanted {
+            map.insert(
+                name.to_owned(),
+                serde_json::json!({"value": value, "source": source}),
+            );
+        }
+        println!("{}", serde_json::to_string_pretty(&map)?);
+    } else {
+        let width = wanted
+            .iter()
+            .map(|(name, _, _)| name.len())
+            .max()
+            .unwrap_or(0);
+        for (name, value, source) in wanted {
+            println!("{name:<width$} = {value} ({source})");
+        }
+    }
+    Ok(())
+}
+/// A path value for display, or the word for "no layer supplied one".
+fn path_or_unset(value: &Option<PathBuf>) -> String {
+    match value {
+        Some(path) => path.display().to_string(),
+        None => "(unset)".to_owned(),
+    }
+}
+/// The layer for a path value. An unset value has no layer, so report the built-in default rather
+/// than a layer that did not supply it.
+fn path_source(value: &Option<PathBuf>, source: ah_core::Source) -> &'static str {
+    if value.is_some() {
+        source.as_str()
+    } else {
+        ah_core::Source::Default.as_str()
+    }
 }
 fn doctor(o: &DoctorOptions) -> Result<()> {
     let resolved = resolve_home_repo(&o.options, None)?;
