@@ -33,6 +33,10 @@ pub struct Manifest {
     /// Personal vault linked by `install --vault`, so `update` re-links to the same place.
     #[serde(default)]
     pub vault: Option<String>,
+    /// The shared-home ref recorded at install time (plan F11): a tag, a branch or a short sha.
+    /// Absent when the checkout is not a git repository.
+    #[serde(default)]
+    pub home_ref: Option<String>,
     #[serde(default)]
     pub entries: BTreeMap<String, ManifestEntry>,
 }
@@ -45,6 +49,7 @@ impl Default for Manifest {
             shared_home: String::new(),
             profile: "developer".into(),
             vault: None,
+            home_ref: None,
             entries: BTreeMap::new(),
         }
     }

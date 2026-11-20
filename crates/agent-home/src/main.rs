@@ -68,6 +68,9 @@ struct DoctorOptions {
     #[arg(long, help = "Emit the doctor report as JSON")]
     json: bool,
 }
+/// The running CLI's version, compared against the home's `[minimum] vesica` (plan F11).
+const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Debug, clap::Args)]
 struct ConfigOptions {
     #[command(subcommand)]
@@ -376,6 +379,23 @@ fn team_status(path: &Path) -> Result<()> {
 }
 
 fn team_pull(path: &Path) -> Result<()> {
+    // F11: a pinned machine does not drift. Refuse rather than silently move past the pin.
+    let config_path = config_dir(None)?;
+    let local = ah_core::LocalConfig::load(&config_path)?;
+    if let Some(pin) = &local.home.reference {
+        if let Some(actual) = pin_mismatch(pin, path) {
+            anyhow::bail!(
+                "this machine pins {pin} but {} is on {actual}; change `[home] ref` in {} to move the pin, or remove it",
+                path.display(),
+                ah_core::LocalConfig::path_in(&config_path).display()
+            );
+        }
+        println!(
+            "Pinned to {pin}; the shared home is left where it is. Edit `[home] ref` in {} to move the pin.",
+            ah_core::LocalConfig::path_in(&config_path).display()
+        );
+        return Ok(());
+    }
     let result = ah_vault::pull_shared_home(path)?;
     if result.old_head == result.new_head {
         println!("Shared home already up to date ({})", result.new_head);
@@ -1141,6 +1161,18 @@ fn doctor(o: &DoctorOptions) -> Result<()> {
     let (selected, profile_source) = prof(&o.options, &resolved.local, &c);
     let selected_profile = ah_agents::ProfileSelection::from_name(&c, selected)?;
     let mut checks = preflight::Preflight::run(c.minimum.node.as_deref());
+    // F11: the home may declare a minimum CLI and a minimum home version. A mismatch blocks.
+    let home_ref = detected_ref(&resolved.home_repo);
+    if let Some(reason) = compatibility_blocker(&c, home_ref.as_deref()) {
+        // The blocker is what blocks. It is not a "required command" row: the report's
+        // `prerequisites.required` values are constrained to `found`/`missing`, so an
+        // incompatibility belongs in `blockers` with a descriptive informational row.
+        checks.optional.push((
+            "home version",
+            "incompatible: the home and this CLI disagree".to_owned(),
+        ));
+        checks.blockers.push(reason);
+    }
     // Informational, never a blocker: install works without a Git identity, but the personal-vault
     // commit paths (`vault snapshot`, `new-skill`, `share`) need one.
     checks.optional.push((
@@ -1199,12 +1231,21 @@ fn doctor(o: &DoctorOptions) -> Result<()> {
             f.deployments.len()
         );
         println!(
-            "Platform: {} {} ({}, kernel {})",
+            "Home ref: {} · CLI {CLI_VERSION}\nPlatform: {} {} ({}, kernel {})",
+            home_ref
+                .as_deref()
+                .unwrap_or("unknown (not a git checkout)"),
             checks.platform.os,
             checks.platform.arch,
             checks.platform.distro,
             checks.platform.kernel
         );
+        if let Some(required) = &c.minimum.vesica {
+            println!("Requires Vesica: {required}");
+        }
+        if let Some(required) = &c.minimum.home {
+            println!("Requires home: {required}");
+        }
         for (name, state) in &checks.required {
             println!("Required {name}: {state}");
         }
@@ -1227,6 +1268,112 @@ fn doctor(o: &DoctorOptions) -> Result<()> {
     }
     Ok(())
 }
+/// The ref a shared-home checkout is on: its exact tag, else its branch, else a short sha.
+/// Read-only and offline: it never fetches, so `status` stays safe to run anywhere.
+fn detected_ref(shared: &Path) -> Option<String> {
+    let git = |args: &[&str]| -> Option<String> {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(shared)
+            .args(args)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8(output.stdout).ok()?;
+        let text = text.trim().to_owned();
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    };
+    if let Some(tag) = git(&["describe", "--tags", "--exact-match"]) {
+        return Some(tag);
+    }
+    match git(&["rev-parse", "--abbrev-ref", "HEAD"]) {
+        Some(branch) if branch != "HEAD" => Some(branch),
+        _ => git(&["rev-parse", "--short", "HEAD"]),
+    }
+}
+
+/// The branch a checkout is on, or a short sha when detached.
+fn detected_branch(shared: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(shared)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+    if branch.is_empty() || branch == "HEAD" {
+        return detected_ref(shared);
+    }
+    Some(branch)
+}
+
+/// Whether a checkout satisfies a pin. `Some(actual)` means it does not, naming what it is on.
+///
+/// A release pin (`v10.5`) requires the checkout to be **at that release** — the exact tag, since
+/// that is what "installed from v10.5" means. A floating pin (`main`) requires the checkout to be
+/// **on that ref**, so the tag sitting at the branch head must not be mistaken for the pin.
+fn pin_mismatch(pin: &str, shared: &Path) -> Option<String> {
+    let actual = if ah_core::version::floats(pin) {
+        detected_branch(shared)
+    } else {
+        detected_ref(shared)
+    };
+    match actual {
+        Some(actual) if actual == pin => None,
+        Some(actual) => Some(actual),
+        None => Some("no detectable git ref".to_owned()),
+    }
+}
+
+/// Local release tags. Never fetches: drift reports only what this checkout already knows.
+fn local_tags(shared: &Path) -> Vec<String> {
+    let output = match std::process::Command::new("git")
+        .arg("-C")
+        .arg(shared)
+        .args(["tag", "--list"])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| line.trim().to_owned())
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+/// Whether the running CLI and the checked-out home satisfy what the home declares in
+/// `[minimum]` (plan F11). Returns the reason `doctor` must block, or `None`.
+/// An unparseable value is never a blocker — it cannot be checked, so it is carried on.
+fn compatibility_blocker(c: &ah_core::AgentHomeConfig, detected: Option<&str>) -> Option<String> {
+    use ah_core::version::{check_minimum, Compatibility};
+    if let Some(required) = &c.minimum.vesica {
+        if check_minimum(CLI_VERSION, required) == Compatibility::TooOld {
+            return Some(format!(
+                "this home needs Vesica {required} or newer, but this CLI is {CLI_VERSION}; upgrade with `vesica update` and re-run"
+            ));
+        }
+    }
+    if let (Some(required), Some(detected)) = (&c.minimum.home, detected) {
+        if check_minimum(detected, required) == Compatibility::TooOld {
+            return Some(format!(
+                "this home's content needs home version {required} or newer, but the checkout is {detected}; run `vesica team pull`, or check out {required}"
+            ));
+        }
+    }
+    None
+}
+
 fn install(o: InstallOptions) -> Result<()> {
     let resolved = resolve_home_repo(&o.options, o.root.as_deref())?;
     let (c, _) = load(&resolved.home_repo, &resolved.local)?;
@@ -1244,6 +1391,17 @@ fn install(o: InstallOptions) -> Result<()> {
             resolved.home_repo.display()
         )
     })?;
+    // F11: a pinned machine installs from the pin, not from whatever the checkout happens to be on.
+    let home_ref = detected_ref(&shared);
+    if let Some(pin) = &resolved.local.home.reference {
+        if let Some(actual) = pin_mismatch(pin, &shared) {
+            anyhow::bail!(
+                "the shared home at {} is on {actual} but this machine pins {pin}; check out {pin} in that checkout, or change `[home] ref` in {}",
+                shared.display(),
+                ah_core::LocalConfig::path_in(&cfg).display()
+            );
+        }
+    }
     if !shared.join("AGENTS.md").is_file() {
         anyhow::bail!("shared home must contain AGENTS.md: {}", shared.display());
     }
@@ -1626,6 +1784,7 @@ fn install(o: InstallOptions) -> Result<()> {
             let mut m = ah_core::Manifest::load(&cfg.join("manifest.json"))?;
             let previous = m.clone();
             m.shared_home = shared.to_string_lossy().into_owned();
+            m.home_ref = home_ref.clone();
             m.profile = selected.into();
             m.vault = vault.as_ref().map(|v| v.to_string_lossy().into_owned());
             // F8: record the resolved machine values (home path, profile, vault, repos dir) in the
@@ -1938,6 +2097,23 @@ Recorded entries: {}",
         m.profile,
         m.entries.len()
     );
+    // F11: informational only, never a blocker, and never a fetch.
+    let local = ah_core::LocalConfig::load(&config_dir(r)?)?;
+    if let (Some(pin), false) = (&local.home.reference, m.shared_home.is_empty()) {
+        let shared = PathBuf::from(&m.shared_home);
+        let detected = detected_ref(&shared);
+        print!(
+            "Pinned ref: {pin} (checkout is {})",
+            detected.as_deref().unwrap_or("not a git checkout")
+        );
+        if let Some((count, newest)) = ah_core::version::behind(pin, &local_tags(&shared)) {
+            println!(" — {count} releases behind ({pin} → {newest}), informational only");
+        } else if ah_core::version::floats(pin) {
+            println!(" — floating, so drift is not reported");
+        } else {
+            println!(" — up to date with the local tags");
+        }
+    }
     Ok(())
 }
 fn uninstall(r: Option<&Path>, dry: bool) -> Result<()> {
