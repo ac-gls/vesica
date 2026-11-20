@@ -75,7 +75,7 @@ pub struct FoundryCatalog {
 impl AgentHomeConfig {
     pub fn parse(input: &str) -> anyhow::Result<Self> {
         let value: toml::Value = toml::from_str(input)?;
-        reject_credentials_toml(&value, "")?;
+        reject_credentials_toml(&value, "", "agent-home.toml")?;
         let config: Self = value.try_into()?;
         if config.schema != 1 {
             anyhow::bail!(
@@ -134,7 +134,7 @@ impl FoundryCatalog {
 /// A repository entry becomes a directory name and a `git clone` argument, so keep both inert:
 /// a single safe path component, and a URL that cannot be read as an option or a
 /// command-executing transport (`ext::`, `fd::`).
-fn validate_repo(repo: &RepoConfig) -> anyhow::Result<()> {
+pub(crate) fn validate_repo(repo: &RepoConfig) -> anyhow::Result<()> {
     let name = repo.name.as_str();
     let safe_name = !name.is_empty()
         && !name.starts_with(['.', '-'])
@@ -198,7 +198,11 @@ fn reject_credentials_json(value: &serde_json::Value, path: &str) -> anyhow::Res
     Ok(())
 }
 
-fn reject_credentials_toml(value: &toml::Value, path: &str) -> anyhow::Result<()> {
+pub(crate) fn reject_credentials_toml(
+    value: &toml::Value,
+    path: &str,
+    file: &str,
+) -> anyhow::Result<()> {
     match value {
         toml::Value::Table(map) => {
             for (key, child) in map {
@@ -208,16 +212,14 @@ fn reject_credentials_toml(value: &toml::Value, path: &str) -> anyhow::Result<()
                     format!("{path}.{key}")
                 };
                 if is_credential_key(key) {
-                    anyhow::bail!(
-                        "credential-like field {child_path} is forbidden in agent-home.toml"
-                    );
+                    anyhow::bail!("credential-like field {child_path} is forbidden in {file}");
                 }
-                reject_credentials_toml(child, &child_path)?;
+                reject_credentials_toml(child, &child_path, file)?;
             }
         }
         toml::Value::Array(items) => {
             for child in items {
-                reject_credentials_toml(child, path)?;
+                reject_credentials_toml(child, path, file)?;
             }
         }
         _ => {}

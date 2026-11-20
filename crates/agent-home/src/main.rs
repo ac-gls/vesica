@@ -53,9 +53,9 @@ struct Options {
         long,
         env = "AGENT_HOME_REPO",
         env = "VESICA_HOME_REPO",
-        help = "Local team shared-home checkout"
+        help = "Local team shared-home checkout (or set home_repo in the local config)"
     )]
-    home_repo: PathBuf,
+    home_repo: Option<PathBuf>,
     #[arg(long, value_enum, help = "Select a team profile")]
     profile: Option<ProfileArg>,
 }
@@ -537,7 +537,7 @@ fn relink_from_manifest(o: &UpdateOptions) -> Result<()> {
     );
     install(InstallOptions {
         options: Options {
-            home_repo: PathBuf::from(&manifest.shared_home),
+            home_repo: Some(PathBuf::from(&manifest.shared_home)),
             profile,
         },
         root: o.root.clone(),
@@ -589,11 +589,12 @@ fn new_skill(o: NewSkillOptions) -> Result<()> {
 /// `standards = true` on a `[[repos]]` entry. Only the plan is produced: opening the PRs needs
 /// separate approval, so anything but `--dry-run` refuses.
 fn sync_standards(o: SyncStandardsOptions) -> Result<()> {
-    let (c, _) = load(&o.options)?;
-    let shared = o.options.home_repo.canonicalize().with_context(|| {
+    let resolved = resolve_home_repo(&o.options, None)?;
+    let (c, _) = load(&resolved.home_repo, &resolved.local)?;
+    let shared = resolved.home_repo.canonicalize().with_context(|| {
         format!(
             "shared-home path does not exist: {}",
-            o.options.home_repo.display()
+            resolved.home_repo.display()
         )
     })?;
     let repos_dir = o.repos_dir.as_ref().context(
@@ -698,10 +699,11 @@ fn git_author_name(shared: &Path) -> Result<String> {
 fn share(o: ShareOptions) -> Result<()> {
     use ah_vault::share::{self, ShareRequest};
     let vault = root(o.root.as_deref())?;
-    let shared = o.options.home_repo.canonicalize().with_context(|| {
+    let resolved = resolve_home_repo(&o.options, o.root.as_deref())?;
+    let shared = resolved.home_repo.canonicalize().with_context(|| {
         format!(
             "shared-home path does not exist: {}",
-            o.options.home_repo.display()
+            resolved.home_repo.display()
         )
     })?;
     let destination_dir = match (&o.area, o.decisions) {
@@ -911,11 +913,67 @@ fn vault_scan(path: &Path) -> Result<()> {
     )
 }
 
-fn load(o: &Options) -> Result<(ah_core::AgentHomeConfig, ah_core::FoundryCatalog)> {
-    let p = o.home_repo.join("agent-home.toml");
-    let c = ah_core::AgentHomeConfig::from_path(&p)
+/// The agent-home configuration directory for a root (`<root>/.config/agent-home`).
+fn config_dir(root_opt: Option<&Path>) -> Result<PathBuf> {
+    Ok(root(root_opt)?.join(".config/agent-home"))
+}
+
+/// A resolved shared home plus the layer that supplied it, and this machine's local config.
+struct ResolvedHome {
+    home_repo: PathBuf,
+    source: ah_core::Source,
+    local: ah_core::LocalConfig,
+    config_dir: PathBuf,
+}
+
+/// Resolves the shared home (plan F8). clap already folds the environment variables into the flag,
+/// so "flag or env" is one layer; the local file is consulted only when neither is present. The
+/// team file cannot supply this value: the home has to be known before it can be read.
+fn resolve_home_repo(o: &Options, root_opt: Option<&Path>) -> Result<ResolvedHome> {
+    let config_dir = config_dir(root_opt)?;
+    let local = ah_core::LocalConfig::load(&config_dir)?;
+    let (home_repo, source) =
+        ah_core::local::resolve(o.home_repo.clone(), local.home_repo.clone(), None, None);
+    let Some(home_repo) = home_repo else {
+        anyhow::bail!(
+            "no shared home configured: pass --home-repo <path>, set VESICA_HOME_REPO, or add `home_repo` to {}",
+            ah_core::LocalConfig::path_in(&config_dir).display()
+        );
+    };
+    Ok(ResolvedHome {
+        home_repo,
+        source,
+        local,
+        config_dir,
+    })
+}
+
+fn profile_value(a: ProfileArg) -> ah_core::Profile {
+    match a {
+        ProfileArg::Core => ah_core::Profile::Core,
+        ProfileArg::Developer => ah_core::Profile::Developer,
+        ProfileArg::Lead => ah_core::Profile::Lead,
+    }
+}
+
+fn profile_text(p: ah_core::Profile) -> &'static str {
+    match p {
+        ah_core::Profile::Core => "core",
+        ah_core::Profile::Developer => "developer",
+        ah_core::Profile::Lead => "lead",
+    }
+}
+
+fn load(
+    shared: &Path,
+    local: &ah_core::LocalConfig,
+) -> Result<(ah_core::AgentHomeConfig, ah_core::FoundryCatalog)> {
+    let p = shared.join("agent-home.toml");
+    let mut c = ah_core::AgentHomeConfig::from_path(&p)
         .with_context(|| format!("cannot load shared-home configuration {}", p.display()))?;
-    let p = o.home_repo.join("foundry.catalog.json");
+    // Machine-local repositories add to the team list and may override an entry by name.
+    c.repos = ah_core::local::merge_repos(&c.repos, &local.repos);
+    let p = shared.join("foundry.catalog.json");
     let f = if p.exists() {
         ah_core::FoundryCatalog::from_path(&p)?
     } else {
@@ -923,27 +981,33 @@ fn load(o: &Options) -> Result<(ah_core::AgentHomeConfig, ah_core::FoundryCatalo
     };
     Ok((c, f))
 }
-fn prof(o: &Options, c: &ah_core::AgentHomeConfig) -> &'static str {
-    o.profile
-        .map(ProfileArg::text)
-        .unwrap_or_else(|| match c.profiles.default {
-            ah_core::Profile::Core => "core",
-            ah_core::Profile::Developer => "developer",
-            ah_core::Profile::Lead => "lead",
-        })
+/// The selected profile, with the layer that supplied it (flag/env, config.toml, team, default).
+fn prof(
+    o: &Options,
+    local: &ah_core::LocalConfig,
+    c: &ah_core::AgentHomeConfig,
+) -> (&'static str, ah_core::Source) {
+    let (value, source) = ah_core::local::resolve(
+        o.profile.map(ProfileArg::text),
+        local.profile.map(profile_text),
+        Some(profile_text(c.profiles.default)),
+        Some("developer"),
+    );
+    (value.unwrap_or("developer"), source)
 }
 fn doctor(o: &DoctorOptions) -> Result<()> {
-    let (c, f) = load(&o.options)?;
+    let resolved = resolve_home_repo(&o.options, None)?;
+    let (c, f) = load(&resolved.home_repo, &resolved.local)?;
     let wsl = ah_wsl::is_wsl()?;
     let wsl_status = if wsl { "detected" } else { "not detected" };
-    let selected = prof(&o.options, &c);
+    let (selected, profile_source) = prof(&o.options, &resolved.local, &c);
     let selected_profile = ah_agents::ProfileSelection::from_name(&c, selected)?;
     let mut checks = preflight::Preflight::run(c.minimum.node.as_deref());
     // Informational, never a blocker: install works without a Git identity, but the personal-vault
     // commit paths (`vault snapshot`, `new-skill`, `share`) need one.
     checks.optional.push((
         "git identity",
-        match git_author_name(&o.options.home_repo) {
+        match git_author_name(&resolved.home_repo) {
             Ok(name) => format!("found: {name}"),
             Err(_) => "missing (needed by vault snapshot, new-skill and share)".to_owned(),
         },
@@ -985,14 +1049,13 @@ fn doctor(o: &DoctorOptions) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         println!(
-            "Shared home: valid
-Team: {} ({})
-Profile: {}
-Repos in config: {}
-Repos for profile: {}\nFoundry deployments: {}",
+            "Shared home: {} ({})\nTeam: {} ({})\nProfile: {} ({})\nRepos in config: {}\nRepos for profile: {}\nFoundry deployments: {}",
+            resolved.home_repo.display(),
+            resolved.source.as_str(),
             c.team.name,
             c.team.org,
             selected,
+            profile_source.as_str(),
             c.repos.len(),
             selected_profile.repositories.len(),
             f.deployments.len()
@@ -1027,19 +1090,20 @@ Repos for profile: {}\nFoundry deployments: {}",
     Ok(())
 }
 fn install(o: InstallOptions) -> Result<()> {
-    let (c, _) = load(&o.options)?;
-    let selected = prof(&o.options, &c);
+    let resolved = resolve_home_repo(&o.options, o.root.as_deref())?;
+    let (c, _) = load(&resolved.home_repo, &resolved.local)?;
+    let (selected, _profile_source) = prof(&o.options, &resolved.local, &c);
     let home = match o.root {
         Some(p) => p,
         None => std::env::var_os("HOME")
             .map(PathBuf::from)
             .context("HOME is not set")?,
     };
-    let cfg = home.join(".config/agent-home");
-    let shared = o.options.home_repo.canonicalize().with_context(|| {
+    let cfg = resolved.config_dir.clone();
+    let shared = resolved.home_repo.canonicalize().with_context(|| {
         format!(
             "shared-home path does not exist: {}",
-            o.options.home_repo.display()
+            resolved.home_repo.display()
         )
     })?;
     if !shared.join("AGENTS.md").is_file() {
@@ -1423,9 +1487,26 @@ fn install(o: InstallOptions) -> Result<()> {
         let persist_result = (|| -> Result<()> {
             let mut m = ah_core::Manifest::load(&cfg.join("manifest.json"))?;
             let previous = m.clone();
-            m.shared_home = o.options.home_repo.to_string_lossy().into_owned();
+            m.shared_home = shared.to_string_lossy().into_owned();
             m.profile = selected.into();
             m.vault = vault.as_ref().map(|v| v.to_string_lossy().into_owned());
+            // F8: record the resolved machine values (home path, profile, vault, repos dir) in the
+            // local config, so later commands need no flag. Machine facts only: never team content.
+            let mut local = resolved.local.clone();
+            local.home_repo = Some(shared.to_path_buf());
+            if let Some(profile) = o.options.profile {
+                local.profile = Some(profile_value(profile));
+            }
+            if let Some(v) = &vault {
+                local.vault = Some(v.clone());
+            }
+            if let Some(dir) = &o.repos_dir {
+                local.repos_dir = Some(
+                    std::path::absolute(dir)
+                        .with_context(|| format!("cannot resolve --repos-dir {}", dir.display()))?,
+                );
+            }
+            local.write(&cfg)?;
             for (a, r) in plan.actions.iter().zip(outcomes) {
                 if matches!(
                     r,
