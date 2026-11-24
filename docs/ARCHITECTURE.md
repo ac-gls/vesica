@@ -10,10 +10,11 @@ vesica CLI
   │           Claude/Codex instruction files and ~/.bashrc; execute supported actions; save manifest
   ├─ update   resolve a release (or --tag), curl the tarball + SHA256SUMS, verify the SHA-256 and
   │           that the binary reports the tag's version, rename it into place, re-link from the
-  │           recorded manifest; staging is always removed and failures leave the binary alone
+  │           recorded manifest through the new executable; guarded binary + managed-state
+  │           recovery on failure; conflicting edits/journals are retained and reported
   ├─ share    person-confirmed promotion of a personal note into the shared home: plan only
   │           without --yes; branch share/<note>; rewrite vault-view links; add owner/authority;
-  │           lint + vault-scan gate with full rollback; never writes trunk, never pushes
+  │           lint + vault-scan gate with guarded rollback; never writes trunk; optional push
   ├─ sync-standards  --dry-run plans Standards/* -> <repo>/.github/instructions/*.instructions.md
   │                  for repos with `standards = true`; writes nothing
   ├─ new-skill scaffold Agents/Skills/<name>/SKILL.md on a new skill/<name> branch (committed,
@@ -75,7 +76,7 @@ The TOML schema validates the document after conversion to JSON (for example wit
 | Copilot CLI | `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` in `config.env` | `.agents/skills/<name>` |
 | Hermes (lead) | printed command plan (`skills.external_dirs`, `skills.create_dir`) | shared `Agents/Skills` + `Agents/Hermes/Skills` |
 
-Merged files are a first-class manifest kind (`merged-file`): backed up before the first merge, verified on reinstall, and restored byte-for-byte by `uninstall`. **Role agents and the addressable Hermes wiring are not implemented** — the plan gates role rendering on the S3 field map, and Hermes configuration is edited by `hermes` itself.
+Merged files are a first-class manifest kind (`merged-file`): backed up before the first merge, verified on reinstall, and restored byte-for-byte by `uninstall`. **OpenCode-only role generation is implemented locally, not yet published**, at `~/.config/opencode/agents/<prefix>-<name>.md` with generated-file ownership and repeat-install/uninstall tests. Claude/Copilot roles remain unsupported. Hermes runtime configuration is still a printed plan, edited by `hermes` itself.
 
 ## Promotion (`share`)
 
@@ -83,8 +84,7 @@ Merged files are a first-class manifest kind (`merged-file`): backed up before t
 always person-invoked (plan §5.6, D26). The properties that matter:
 
 - **Confirmation.** `--yes` is required to write anything; without it the command prints the plan.
-- **No trunk writes.** Everything happens on `share/<note>`; a failed gate deletes the branch,
-  unstages, and removes the untracked note, so the checkout is left exactly as it was found.
+- **No trunk writes.** Everything happens on `share/<note>`. Recoverable failures attempt restoration of personal bytes/modes/types and shared branch/index/content. Intervening edits are preserved and rollback errors reported; incomplete personal rollback retains the promotion rather than deleting the target of a retained rewritten link. This is not arbitrary crash recovery.
 - **Links.** `[[Team/…]]` is the vault's view of the shared home, so promoting rewrites those links
   to the shared-home path; a link that resolves nowhere in the shared home is refused unless
   `--drop-unresolved-links` keeps its text. Inbound personal links to the promoted note become
@@ -95,7 +95,7 @@ always person-invoked (plan §5.6, D26). The properties that matter:
 
 ## Git usage
 
-All Git access goes through `crates/ah-vault/src/git.rs`. `isolated` blanks system and global config for read-only structural checks and pulls, so results don't depend on local config; `user` keeps the person's own identity and hooks for anything that creates commits (`vault snapshot`, `new-skill`). Nothing in Vesica pushes.
+Git subprocesses use `crates/ah-vault/src/git.rs` to remove inherited repository/index/object selectors. `isolated` blanks system/global config; `user` retains identity/hooks for commits. Mutators validate effective Git storage and refuse linked-worktree mutations; read-only linked-worktree inspection is supported. `share --open-pr` explicitly pushes the branch and prints instructions; it does not create a PR. Tests use local bare remotes only.
 
 ## Safety and transaction
 
@@ -123,7 +123,10 @@ These are Linux/WSL development-container results. Installer fixtures simulate L
 6. Manifest writes use a unique-create temp file, restrictive Unix permissions, flush/sync, then rename; a preexisting temp file or symlink is not followed or overwritten.
 7. The JSON manifest records install targets, source paths, backups, and hashes. Uninstall restores/removes only entries it can verify; ambiguous or modified content is retained and reported. A backed-up managed file is restored only when it still matches the installed hash *and* re-applying the install transform to the verified backup reproduces it exactly. The backup bytes are then written back, so CRLF endings, a missing final newline and other formatting round-trip byte-for-byte.
 8. Symlinks are created only at absent destinations or accepted if already correct; existing user destinations are never replaced.
-9. Secret scan output contains locations only. Scanner limits individual files to 2 MB and does not traverse symlinks.
+9. Secret scan output contains locations only. Text candidates are limited to 2,000,000 bytes; unsupported binary, oversized or unreadable text fails closed. Known binary assets are exempt from content inspection, not proof of clean content; explicit scan reports and snapshot/share mutation gates list excluded assets. Symlinks are not traversed.
+10. Install stages/syncs a private local-config replacement before personal vault scaffolding, then commits machine facts only after managed actions succeed. Vault scaffolding and repository clones are unmanaged and kept; later runtime failures do not promise their removal.
+11. Uninstall checkpoints completed ownership removals and retains pending/modified entries. A failed progress save attempts guarded restoration of the current mutation; retries use the accurate remaining manifest.
+12. Update recovery spans binary replacement, installer-managed relink acceptance and staging cleanup. Disk `.vesica-relink-*` journals retain managed pre/post state on conflict or cleanup failure. Outer binary recovery is in memory, not a crash-durable journal; a candidate's arbitrary writes are outside the installer-managed boundary. See the tests in `update.rs` and `remediation.rs`.
 
 ## Release
 
@@ -140,10 +143,10 @@ These are Linux/WSL development-container results. Installer fixtures simulate L
 - `bash tests/install.sh` builds a disposable fixture release and checks Linux host/architecture gating, bootstrap-only installation, preservation of spaced CLI arguments, and checksum rejection without side effects. It is network-free; CI runs it alongside ShellCheck. It does not establish the plan's complete install → doctor → idempotent reinstall parity acceptance.
 - Private-team cloning/bootstrap remains incomplete; rollback covers bounded installer action/manifest failure cases only.
 - Profile selection is recorded in the manifest; both `doctor` and `install` report the repositories assigned to the selected profile. With `--repos-dir` (or `VESICA_REPOS_DIR`), `install` clones missing repositories for the `developer` and `lead` profiles (plan §5.4 step 10). It plans read-only before any mutation, never modifies an existing destination (a matching checkout is `Present`; anything else is `Skipped` and left untouched), clones through a temporary sibling directory so a failure leaves no partial checkout, disables Git prompts and the `ext`/`fd` transports, and reports clone failures with a non-zero exit after the managed configuration is installed. Clones are not manifest entries; `uninstall` keeps repositories. The `core` profile has no repositories: config rejects `core` in a repo's `profiles`, and an empty list means developer and lead. Every profile links the full shared skill set (plan §3).
-- Claude/Codex and discovered skill links are the only harness wiring. OpenCode, Copilot, Hermes, role-agent rendering, Foundry, and Herdr are not wired.
+- Claude/Codex instruction blocks, OpenCode instruction merging, Copilot instruction-directory exports and shared skills are wired. OpenCode role generation is local/unpublished; Claude/Copilot roles are unsupported. Hermes runtime edits, Foundry and Herdr remain unimplemented/gated.
 - WSL detection exists, but Windows profile discovery, drvfs/OneDrive validation, `winget`, Obsidian, scheduled tasks, and Windows-side operations do not.
 - Vault scan is a heuristic check for common patterns, not a complete DLP/secret detector; absence of findings is not proof that a vault is secret-free.
-- No signed release/update path or native-Linux lifecycle/dogfood validation is implemented (Windows+WSL is optional); rollback remains bounded to the tested action/manifest failure cases above.
+- Native Ubuntu 22.04/24.04 lifecycle and release-verification CI jobs exist; historical green runs do not verify this uncommitted tree. Local WSL/container evidence is supplemental. No signed/publisher-authenticated release path or arbitrary power-loss recovery is claimed.
 
 ## Verification
 

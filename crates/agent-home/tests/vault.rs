@@ -225,6 +225,65 @@ fn new_note_creates_a_contract_compliant_ledger_note_once() {
 }
 
 #[test]
+fn new_note_refuses_symlinked_ledger_ancestors_without_writing_outside() {
+    let cases = [
+        "Sessions",
+        "agent-runs",
+        "dangling-Sessions",
+        "dangling-agent-runs",
+    ];
+    for case in cases {
+        let (_temp, vault) = new_vault();
+        let sessions = vault.join("Sessions");
+        let runs = sessions.join("agent-runs");
+        let outside = vault.parent().unwrap().join(format!("outside-{case}"));
+        match case {
+            "Sessions" => {
+                std::fs::remove_dir_all(&sessions).unwrap();
+                std::fs::create_dir(&outside).unwrap();
+                std::os::unix::fs::symlink(&outside, &sessions).unwrap();
+            }
+            "agent-runs" => {
+                std::fs::remove_dir_all(&runs).unwrap();
+                std::fs::create_dir(&outside).unwrap();
+                std::os::unix::fs::symlink(&outside, &runs).unwrap();
+            }
+            "dangling-Sessions" => {
+                std::fs::remove_dir_all(&sessions).unwrap();
+                std::os::unix::fs::symlink(&outside, &sessions).unwrap();
+            }
+            "dangling-agent-runs" => {
+                std::fs::remove_dir_all(&runs).unwrap();
+                std::os::unix::fs::symlink(&outside, &runs).unwrap();
+            }
+            _ => unreachable!(),
+        }
+
+        vesica(
+            &[
+                "new-note",
+                "--task",
+                "private-task",
+                "--agent",
+                "audit",
+                "--date",
+                "2026-11-18",
+            ],
+            &vault,
+        )
+        .failure();
+        assert!(
+            !outside.join("2026-11-18_private-task_audit.md").exists(),
+            "{case} symlink must not receive a ledger note"
+        );
+        assert!(
+            !outside.exists() || matches!(case, "Sessions" | "agent-runs"),
+            "dangling {case} symlink target must not be created"
+        );
+    }
+}
+
+#[test]
 fn new_note_rejects_unsafe_names_and_dates() {
     let (_temp, vault) = new_vault();
     for args in [
@@ -552,4 +611,44 @@ fn switching_to_a_vault_removes_the_stale_home_team_link_only_if_unmodified() {
     assert_eq!(std::fs::read_link(home2.join("Team")).unwrap(), temp.path());
     uninstall(&home2).success();
     assert_eq!(std::fs::read_link(home2.join("Team")).unwrap(), temp.path());
+}
+
+#[test]
+fn snapshot_reports_exempt_assets_without_counting_them_as_scanned_text() {
+    let (_temp, vault) = new_vault();
+    vesica(&["snapshot", "--message", "baseline"], &vault).success();
+    for mixed in [false, true] {
+        let asset = vault.join(if mixed { "mixed.PDF" } else { "only.png" });
+        let bytes = b"\x00\xffexempt asset bytes";
+        std::fs::write(&asset, bytes).unwrap();
+        if mixed {
+            std::fs::write(vault.join("clean.md"), b"Ordinary text.\n").unwrap();
+        }
+        vesica(&["snapshot", "--message", "assets"], &vault)
+            .success()
+            .stderr(predicate::str::contains(format!(
+                "Excluded/unscanned asset: {}",
+                asset.display()
+            )))
+            .stderr(predicate::str::contains("not counted as clean"));
+        assert_eq!(std::fs::read(&asset).unwrap(), bytes);
+        assert!(git(&vault, &["ls-files"]).contains(asset.file_name().unwrap().to_str().unwrap()));
+        assert_eq!(git(&vault, &["status", "--porcelain"]), "");
+    }
+}
+
+#[test]
+fn vault_scan_reports_excluded_binary_assets_separately_from_clean_text() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("plain.md"), b"ordinary text").unwrap();
+    std::fs::write(temp.path().join("image.png"), [0xff, 0x00]).unwrap();
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["vault-scan", "--path"])
+        .arg(temp.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Scanned 1 text file(s)"))
+        .stdout(predicate::str::contains("Excluded/unscanned asset:"))
+        .stdout(predicate::str::contains("image.png"));
 }

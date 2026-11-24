@@ -128,7 +128,14 @@ fn command_version(program: &Path) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&output.stdout);
+    parse_command_version_output(
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+    )
+}
+
+fn parse_command_version_output(stdout: &str, stderr: &str) -> Option<String> {
+    let text = if stdout.is_empty() { stderr } else { stdout };
     let line = text.lines().next()?.trim();
     Some(line.trim_start_matches('v').to_owned()).filter(|v| !v.is_empty())
 }
@@ -147,6 +154,22 @@ pub fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::parse_version;
+
+    #[test]
+    fn parses_version_output_prefix_and_uses_first_stdout_line() {
+        assert_eq!(
+            super::parse_command_version_output("v18.19.0\nignored", ""),
+            Some("18.19.0".to_owned())
+        );
+    }
+
+    #[test]
+    fn parses_version_from_stderr_when_stdout_is_empty() {
+        assert_eq!(
+            super::parse_command_version_output("", "Version 22.4.1\n"),
+            Some("Version 22.4.1".to_owned())
+        );
+    }
 
     #[test]
     fn parses_and_orders_versions() {

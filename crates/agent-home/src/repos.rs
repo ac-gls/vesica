@@ -90,7 +90,7 @@ fn origin_url(dir: &Path) -> Option<String> {
 }
 
 fn git() -> std::process::Command {
-    let mut command = std::process::Command::new("git");
+    let mut command = ah_vault::git::command(Path::new("."), &[], false);
     // Never prompt (would hang an unattended install) and never allow command transports.
     command
         .env("GIT_TERMINAL_PROMPT", "0")

@@ -108,6 +108,15 @@ impl AgentHomeConfig {
                 "team.env_prefix must contain only ASCII letters, digits, and underscores, and must not start with a digit"
             );
         }
+        let role_prefix = &config.team.role_prefix;
+        if role_prefix
+            .chars()
+            .any(|c| !c.is_ascii_alphanumeric() && !matches!(c, '_' | '-'))
+        {
+            anyhow::bail!(
+                "team.role_prefix must contain only ASCII letters, digits, underscores, and hyphens"
+            );
+        }
         for repo in &config.repos {
             validate_repo(repo)?;
         }
@@ -277,6 +286,23 @@ mod tests {
         assert!(core
             .to_string()
             .contains("the core profile has no repositories"));
+    }
+
+    #[test]
+    fn validates_role_prefix_as_a_safe_filename_prefix() {
+        let config_with_role_prefix = |role_prefix: &str| {
+            AgentHomeConfig::parse(&format!(
+                "schema = 1\n[team]\nname = \"T\"\norg = \"o\"\nenv_prefix = \"T\"\nrole_prefix = \"{role_prefix}\"\n[profiles]\ndefault = \"developer\"\n"
+            ))
+        };
+
+        assert!(config_with_role_prefix("t-").is_ok());
+        for role_prefix in ["../", "../../", "../outside/", "a/b", "a\\\\b", ".", ".."] {
+            assert!(
+                config_with_role_prefix(role_prefix).is_err(),
+                "{role_prefix:?}"
+            );
+        }
     }
 
     #[test]

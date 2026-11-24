@@ -2,6 +2,8 @@
 
 use ah_core::{Profile, RepoConfig};
 use anyhow::{Context, Result};
+use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -68,9 +70,235 @@ pub fn discover_skills(root: &Path) -> Result<Vec<Skill>> {
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(skills)
 }
+/// A neutral, content-free role specification consumed by supported renderers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Role {
+    pub name: String,
+    pub description: String,
+    pub prompt: String,
+    /// OpenCode-specific frontmatter overrides, serialized as YAML key-value lines.
+    pub opencode: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RoleFrontmatter {
+    name: String,
+    description: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, serde_yaml::Value>,
+}
+
+/// Discover role documents with canonical neutral frontmatter (`name`, `description`) and
+/// the Markdown body as prompt. Optional `opencode` settings are rendered only for OpenCode.
+pub fn discover_roles(root: &Path) -> Result<Vec<Role>> {
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut roles = Vec::new();
+    for item in std::fs::read_dir(root)
+        .with_context(|| format!("reading roles directory {}", root.display()))?
+    {
+        let item = item?;
+        let path = item.path();
+        if !path.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading role {}", path.display()))?;
+        let (role, _) =
+            parse_role(&text).with_context(|| format!("invalid role {}", path.display()))?;
+        roles.push(role);
+    }
+    roles.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut names = std::collections::BTreeSet::new();
+    for role in &roles {
+        if !names.insert(role.name.as_str()) {
+            anyhow::bail!("duplicate role name `{}` in {}", role.name, root.display());
+        }
+    }
+    Ok(roles)
+}
+
+fn parse_role(text: &str) -> Result<(Role, String)> {
+    let normalized = text
+        .strip_prefix('\u{feff}')
+        .unwrap_or(text)
+        .replace("\r\n", "\n");
+    let rest = normalized
+        .strip_prefix("---\n")
+        .context("role must begin with YAML frontmatter")?;
+    let end = rest
+        .find("\n---")
+        .context("unterminated YAML frontmatter")?;
+    let frontmatter = &rest[..end];
+    let prompt = rest[end + 4..].trim().to_owned();
+    if prompt.is_empty() {
+        anyhow::bail!("missing role prompt in Markdown body");
+    }
+    let parsed: RoleFrontmatter =
+        serde_yaml::from_str(frontmatter).context("parsing YAML frontmatter")?;
+    if parsed
+        .extra
+        .keys()
+        .any(|key| key != "opencode" && key != "model" && key != "tools")
+    {
+        anyhow::bail!(
+            "unsupported role frontmatter fields: {}",
+            parsed.extra.keys().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
+    let mut opencode = match parsed.extra.get("opencode") {
+        None => BTreeMap::new(),
+        Some(serde_yaml::Value::Mapping(values)) => values
+            .iter()
+            .map(|(key, value)| {
+                let key = key
+                    .as_str()
+                    .context("OpenCode override keys must be strings")?
+                    .to_owned();
+                Ok((key, value.clone()))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?,
+        Some(_) => anyhow::bail!("`opencode` overrides must be a mapping"),
+    };
+    for key in ["model", "tools"] {
+        if !opencode.contains_key(key) {
+            if let Some(value) = parsed.extra.get(key) {
+                opencode.insert(key.to_owned(), value.clone());
+            }
+        }
+    }
+    let opencode = opencode;
+    if parsed.name.is_empty()
+        || parsed
+            .name
+            .chars()
+            .any(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+    {
+        anyhow::bail!("role name must contain only ASCII letters, numbers, `-` or `_`");
+    }
+    if parsed.description.trim().is_empty() {
+        anyhow::bail!("role description must not be empty");
+    }
+    let opencode = if opencode.is_empty() {
+        None
+    } else {
+        Some(serde_yaml::to_string(&opencode)?.trim().to_owned())
+    };
+    let role = Role {
+        name: parsed.name,
+        description: parsed.description,
+        prompt,
+        opencode,
+    };
+    Ok((role, normalized))
+}
+
+/// Render the OpenCode user-agent Markdown format using the observed discovery convention.
+pub fn render_opencode_role(role: &Role, prefix: &str) -> (String, String) {
+    let name = format!("{prefix}{}", role.name);
+    let mut content = format!("---\ndescription: {}\n", yaml_quote(&role.description));
+    if let Some(overrides) = &role.opencode {
+        content.push_str(overrides);
+        content.push('\n');
+    }
+    content.push_str("mode: subagent\n---\n");
+    content.push_str(&role.prompt);
+    content.push('\n');
+    (name, content)
+}
+
+fn yaml_quote(value: &str) -> String {
+    serde_yaml::to_string(value)
+        .unwrap_or_else(|_| format!("\"{}\"", value.replace('"', "\\\"")))
+        .trim()
+        .to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovers_roles_and_renders_opencode_agent_markdown() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("sample.md"),
+            "---\nname: sample\ndescription: A neutral role.\n---\nSummarize carefully.\n",
+        )
+        .unwrap();
+        let roles = discover_roles(temp.path()).unwrap();
+        assert_eq!(roles.len(), 1);
+        assert_eq!(roles[0].prompt, "Summarize carefully.");
+        assert_eq!(render_opencode_role(&roles[0], "ex-").0, "ex-sample");
+    }
+
+    #[test]
+    fn legacy_fields_are_not_rendered_and_unknown_fields_are_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("role.md");
+        std::fs::write(
+            &path,
+            "---\nname: sample\ndescription: A neutral role.\nmodel: legacy-model\ntools: [Read]\n---\nPrompt text.\n",
+        )
+        .unwrap();
+        let roles = discover_roles(temp.path()).unwrap();
+        let rendered = render_opencode_role(&roles[0], "ex-").1;
+        assert!(rendered.contains("model: legacy-model"));
+        assert!(rendered.contains("tools:"));
+
+        std::fs::write(
+            &path,
+            "---\nname: sample\ndescription: A neutral role.\nopencode:\n  temperature: 0.2\n---\nPrompt text.\n",
+        )
+        .unwrap();
+        let roles = discover_roles(temp.path()).unwrap();
+        let rendered = render_opencode_role(&roles[0], "ex-").1;
+        assert!(rendered.contains("temperature: 0.2"));
+
+        std::fs::write(
+            &path,
+            "---\nname: sample\ndescription: A neutral role.\nopencode:\n  temperature: 0.2\n---\nPrompt text.\n",
+        )
+        .unwrap();
+        let roles = discover_roles(temp.path()).unwrap();
+        let rendered = render_opencode_role(&roles[0], "ex-").1;
+        assert!(!rendered.contains("legacy-only"));
+        assert!(!rendered.contains("Read"));
+
+        std::fs::write(
+            &path,
+            "---\nname: sample\ndescription: A neutral role.\nopencode:\n  temperature: 0.2\n---\nPrompt text.\n",
+        )
+        .unwrap();
+        let roles = discover_roles(temp.path()).unwrap();
+        let rendered = render_opencode_role(&roles[0], "ex-").1;
+        assert!(rendered.contains("temperature: 0.2"));
+
+        std::fs::write(
+            &path,
+            "---\nname: sample\ndescription: A neutral role.\nopencode: invalid\n---\nPrompt text.\n",
+        )
+        .unwrap();
+        let err = discover_roles(temp.path()).unwrap_err();
+        assert!(format!("{err:#}").contains("overrides must be a mapping"));
+
+        std::fs::write(
+            &path,
+            "---\nname: sample\ndescription: A neutral role.\nunsupported: value\n---\nPrompt text.\n",
+        )
+        .unwrap();
+        let err = discover_roles(temp.path()).unwrap_err();
+        assert!(format!("{err:#}").contains("unsupported role frontmatter fields"));
+
+        std::fs::write(
+            &path,
+            "---\nname: sample\ndescription: A neutral role.\n---\n",
+        )
+        .unwrap();
+        let err = discover_roles(temp.path()).unwrap_err();
+        assert!(format!("{err:#}").contains("missing role prompt"));
+    }
 
     #[test]
     fn profile_selection_includes_only_matching_or_shared_repositories() {

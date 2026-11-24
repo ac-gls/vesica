@@ -12,6 +12,8 @@ publish = false
 [dependencies]
 ah-core = { path = "../ah-core" }
 anyhow.workspace = true
+serde.workspace = true
+serde_yaml = { package = "yaml_serde", version = "0.10.7" }
 
 [dev-dependencies]
 tempfile.workspace = true

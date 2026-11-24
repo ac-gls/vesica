@@ -57,9 +57,12 @@ fi
 
 tar -xzf "$WORK/$ASSET" -C "$WORK"
 [ -f "$WORK/vesica" ] || die "release tarball does not contain vesica"
+version_output=$("$WORK/vesica" --version 2>/dev/null) || die "version probe failed: staged vesica --version exited unsuccessfully"
+REPORTED_VERSION=$version_output
+[ "$REPORTED_VERSION" = "vesica ${VERSION#v}" ] || die "version mismatch: expected vesica ${VERSION#v}, got ${REPORTED_VERSION:-no version}"
 mkdir -p "$BIN_DIR"
 install -m 0755 "$WORK/vesica" "$BIN_DIR/vesica"
-printf 'vesica %s installed to %s\n' "$VERSION" "$BIN_DIR/vesica"
+printf '%s installed to %s\n' "$REPORTED_VERSION" "$BIN_DIR/vesica"
 
 [ "$BOOTSTRAP_ONLY" = "1" ] && exit 0
 # Re-assemble the remaining arguments safely (one per line, no word splitting).

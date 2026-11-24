@@ -13,10 +13,19 @@ fn fixture_home() -> PathBuf {
 }
 
 fn install(home: &Path, vault: Option<&Path>, profile: &str) -> assert_cmd::assert::Assert {
+    install_shared(home, vault, profile, &fixture_home())
+}
+
+fn install_shared(
+    home: &Path,
+    vault: Option<&Path>,
+    profile: &str,
+    shared: &Path,
+) -> assert_cmd::assert::Assert {
     let mut command = Command::cargo_bin("vesica").unwrap();
     command
         .args(["install", "--home-repo"])
-        .arg(fixture_home())
+        .arg(shared)
         .arg("--root")
         .arg(home)
         .args(["--profile", profile]);
@@ -59,7 +68,7 @@ fn opencode_instructions_merge_keeps_a_users_file_and_their_entries() {
     )
     .unwrap();
 
-    install(&home, Some(&vault), "developer").success();
+    install_shared(&home, Some(&vault), "developer", &fixture_home()).success();
 
     let merged = std::fs::read_to_string(&config).unwrap();
     assert!(merged.contains("// my OpenCode settings"), "{merged}");
@@ -88,7 +97,7 @@ fn opencode_instructions_merge_keeps_a_users_file_and_their_entries() {
     );
 
     // Idempotent: a second install must not duplicate or reorder anything.
-    install(&home, Some(&vault), "developer").success();
+    install_shared(&home, Some(&vault), "developer", &fixture_home()).success();
     assert_eq!(std::fs::read_to_string(&config).unwrap(), merged);
 }
 
@@ -96,7 +105,7 @@ fn opencode_instructions_merge_keeps_a_users_file_and_their_entries() {
 fn opencode_instructions_are_created_when_absent_and_cover_the_shared_home() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
-    install(&home, None, "core").success();
+    install_shared(&home, None, "core", &fixture_home()).success();
     let text = std::fs::read_to_string(opencode_config(&home)).unwrap();
     let json: serde_json::Value =
         jsonc_parser::parse_to_serde_value(&text, &jsonc_parser::ParseOptions::default()).unwrap();
@@ -171,7 +180,7 @@ fn hermes_plan_is_printed_for_lead_and_touches_no_hermes_config() {
 
     // Only the lead profile gets it.
     let other = temp.path().join("home2");
-    let out = install(&other, None, "developer")
+    let out = install_shared(&other, None, "developer", &fixture_home())
         .success()
         .get_output()
         .clone();
@@ -189,6 +198,336 @@ fn uninstall(home: &Path) -> assert_cmd::assert::Assert {
 }
 
 #[test]
+fn opencode_role_install_renders_files_and_tracks_generated_files_for_uninstall() {
+    let temp = tempfile::tempdir().unwrap();
+    let shared = temp.path().join("shared");
+    let roles = shared.join("Agents/Roles");
+    std::fs::create_dir_all(&roles).unwrap();
+    std::fs::write(shared.join("AGENTS.md"), "# Shared instructions\n").unwrap();
+    std::fs::write(
+        shared.join("agent-home.toml"),
+        "schema = 1\n[team]\nname = \"Example\"\norg = \"Example\"\nenv_prefix = \"EX\"\nrole_prefix = \"ex-\"\n[profiles]\ndefault = \"developer\"\n",
+    ).unwrap();
+    std::fs::write(
+        roles.join("example.md"),
+        "---\nname: example\ndescription: A neutral example role.\n---\nWrite a careful summary.\n",
+    )
+    .unwrap();
+    let home = temp.path().join("home");
+    let agents = home.join(".config/opencode/agents");
+    let generated = agents.join("ex-example.md");
+
+    install_shared(&home, None, "core", &shared).success();
+    let expected = "---\ndescription: A neutral example role.\nmode: subagent\n---\nWrite a careful summary.\n";
+    assert_eq!(std::fs::read(&generated).unwrap(), expected.as_bytes());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&generated).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "generated role prompts use private permissions independent of umask"
+        );
+    }
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(home.join(".config/agent-home/manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest["entries"][generated.to_str().unwrap()]["kind"],
+        "generated-file"
+    );
+
+    install_shared(&home, None, "core", &shared).success();
+    assert_eq!(
+        std::fs::read(&generated).unwrap(),
+        expected.as_bytes(),
+        "repeat install is idempotent"
+    );
+    uninstall(&home).success();
+    assert!(
+        !generated.exists(),
+        "uninstall removes only the unchanged generated role"
+    );
+}
+
+#[test]
+fn opencode_role_install_refuses_user_collisions_and_preserves_modified_roles_on_uninstall() {
+    let temp = tempfile::tempdir().unwrap();
+    let shared = temp.path().join("shared");
+    let roles = shared.join("Agents/Roles");
+    std::fs::create_dir_all(&roles).unwrap();
+    std::fs::write(shared.join("AGENTS.md"), "# Shared instructions\n").unwrap();
+    std::fs::write(
+        shared.join("agent-home.toml"),
+        "schema = 1\n[team]\nname = \"Example\"\norg = \"Example\"\nenv_prefix = \"EX\"\nrole_prefix = \"ex-\"\n[profiles]\ndefault = \"developer\"\n",
+    ).unwrap();
+    std::fs::write(
+        roles.join("example.md"),
+        "---\nname: example\ndescription: Example.\n---\nPrompt.\n",
+    )
+    .unwrap();
+    let home = temp.path().join("home");
+    let target = home.join(".config/opencode/agents/ex-example.md");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, "user-owned bytes\n").unwrap();
+    let out = install_shared(&home, None, "core", &shared)
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unmanaged destination already exists"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"user-owned bytes\n");
+    assert!(
+        !home.join(".config/agent-home/manifest.json").exists(),
+        "failed install leaves no manifest"
+    );
+}
+
+#[test]
+fn opencode_role_uninstall_keeps_user_modified_generated_role_and_manifest_entry() {
+    let temp = tempfile::tempdir().unwrap();
+    let shared = temp.path().join("shared");
+    let roles = shared.join("Agents/Roles");
+    std::fs::create_dir_all(&roles).unwrap();
+    std::fs::write(shared.join("AGENTS.md"), "# Shared instructions\n").unwrap();
+    std::fs::write(
+        shared.join("agent-home.toml"),
+        "schema = 1\n[team]\nname = \"Example\"\norg = \"Example\"\nenv_prefix = \"EX\"\nrole_prefix = \"ex-\"\n[profiles]\ndefault = \"developer\"\n",
+    ).unwrap();
+    std::fs::write(
+        roles.join("example.md"),
+        "---\nname: example\ndescription: Example.\n---\nPrompt.\n",
+    )
+    .unwrap();
+    let home = temp.path().join("home");
+    let target = home.join(".config/opencode/agents/ex-example.md");
+    install_shared(&home, None, "core", &shared).success();
+    std::fs::write(&target, "user edit\n").unwrap();
+    let output = uninstall(&home).success().get_output().clone();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("Skipped modified generated file"),
+        "{stdout}"
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"user edit\n");
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(home.join(".config/agent-home/manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        manifest["entries"][target.to_str().unwrap()].is_object(),
+        "modified generated file stays recorded"
+    );
+}
+
+#[test]
+fn opencode_config_uninstall_preserves_replacement_symlink_and_referent() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        install_shared(&home, None, "core", &fixture_home()).success();
+        let target = opencode_config(&home);
+        let installed = std::fs::read(&target).unwrap();
+        let outside = temp.path().join("outside-config.json");
+        std::fs::write(&outside, &installed).unwrap();
+        std::fs::remove_file(&target).unwrap();
+        symlink(&outside, &target).unwrap();
+
+        let output = uninstall(&home).success().get_output().clone();
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("Skipped replaced managed target"),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+
+        assert!(target.is_symlink());
+        assert_eq!(std::fs::read(&outside).unwrap(), installed);
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(home.join(".config/agent-home/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(manifest["entries"][target.to_str().unwrap()].is_object());
+    }
+}
+
+#[test]
+fn opencode_role_reinstall_prunes_unchanged_files_after_prefix_change() {
+    let temp = tempfile::tempdir().unwrap();
+    let shared = temp.path().join("shared");
+    let roles = shared.join("Agents/Roles");
+    std::fs::create_dir_all(&roles).unwrap();
+    std::fs::write(shared.join("AGENTS.md"), "# Shared instructions\n").unwrap();
+    let config = shared.join("agent-home.toml");
+    std::fs::write(
+        &config,
+        "schema = 1\n[team]\nname = \"Example\"\norg = \"Example\"\nenv_prefix = \"EX\"\nrole_prefix = \"ex-\"\n[profiles]\ndefault = \"developer\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        roles.join("example.md"),
+        "---\nname: example\ndescription: Example.\n---\nPrompt.\n",
+    )
+    .unwrap();
+    let home = temp.path().join("home");
+    let agents = home.join(".config/opencode/agents");
+    let old = agents.join("ex-example.md");
+    let new = agents.join("team-example.md");
+    install_shared(&home, None, "core", &shared).success();
+
+    let initial = std::fs::read(&config).unwrap();
+    let changed = String::from_utf8(initial)
+        .unwrap()
+        .replace("role_prefix = \"ex-\"", "role_prefix = \"team-\"");
+    std::fs::write(&config, changed).unwrap();
+    install_shared(&home, None, "core", &shared).success();
+
+    assert!(!old.exists(), "unchanged stale generated role is removed");
+    assert!(new.is_file(), "current-prefix role is installed");
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(home.join(".config/agent-home/manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(manifest["entries"][old.to_str().unwrap()].is_null());
+    assert!(manifest["entries"][new.to_str().unwrap()].is_object());
+}
+
+#[test]
+fn opencode_role_reinstall_preserves_modified_stale_file_and_manifest_ownership() {
+    let temp = tempfile::tempdir().unwrap();
+    let shared = temp.path().join("shared");
+    let roles = shared.join("Agents/Roles");
+    std::fs::create_dir_all(&roles).unwrap();
+    std::fs::write(shared.join("AGENTS.md"), "# Shared instructions\n").unwrap();
+    let config = shared.join("agent-home.toml");
+    std::fs::write(
+        &config,
+        "schema = 1\n[team]\nname = \"Example\"\norg = \"Example\"\nenv_prefix = \"EX\"\nrole_prefix = \"ex-\"\n[profiles]\ndefault = \"developer\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        roles.join("example.md"),
+        "---\nname: example\ndescription: Example.\n---\nPrompt.\n",
+    )
+    .unwrap();
+    let home = temp.path().join("home");
+    let agents = home.join(".config/opencode/agents");
+    let old = agents.join("ex-example.md");
+    let new = agents.join("team-example.md");
+    install_shared(&home, None, "core", &shared).success();
+    std::fs::write(&old, b"user-edited role bytes\n").unwrap();
+
+    let changed = std::fs::read_to_string(&config)
+        .unwrap()
+        .replace("role_prefix = \"ex-\"", "role_prefix = \"team-\"");
+    std::fs::write(&config, changed).unwrap();
+    let output = install_shared(&home, None, "core", &shared)
+        .success()
+        .get_output()
+        .clone();
+
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Kept modified stale generated file"));
+    assert_eq!(std::fs::read(&old).unwrap(), b"user-edited role bytes\n");
+    assert!(new.is_file());
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(home.join(".config/agent-home/manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        manifest["entries"][old.to_str().unwrap()].is_object(),
+        "modified stale file remains recorded as managed"
+    );
+    assert!(manifest["entries"][new.to_str().unwrap()].is_object());
+}
+
+#[test]
+fn opencode_role_reinstall_restores_a_missing_generated_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let shared = temp.path().join("shared");
+    let roles = shared.join("Agents/Roles");
+    std::fs::create_dir_all(&roles).unwrap();
+    std::fs::write(shared.join("AGENTS.md"), "# Shared instructions\n").unwrap();
+    std::fs::write(
+        shared.join("agent-home.toml"),
+        "schema = 1\n[team]\nname = \"Example\"\norg = \"Example\"\nenv_prefix = \"EX\"\nrole_prefix = \"ex-\"\n[profiles]\ndefault = \"developer\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        roles.join("example.md"),
+        "---\nname: example\ndescription: Example.\n---\nPrompt.\n",
+    )
+    .unwrap();
+    let home = temp.path().join("home");
+    let target = home.join(".config/opencode/agents/ex-example.md");
+    install_shared(&home, None, "core", &shared).success();
+    std::fs::remove_file(&target).unwrap();
+
+    install_shared(&home, None, "core", &shared).success();
+
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        b"---\ndescription: Example.\nmode: subagent\n---\nPrompt.\n"
+    );
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(home.join(".config/agent-home/manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(manifest["entries"][target.to_str().unwrap()].is_object());
+}
+
+#[test]
+fn opencode_role_reinstall_refuses_modified_generated_file_before_side_effects() {
+    let temp = tempfile::tempdir().unwrap();
+    let shared = temp.path().join("shared");
+    let roles = shared.join("Agents/Roles");
+    std::fs::create_dir_all(&roles).unwrap();
+    std::fs::write(shared.join("AGENTS.md"), "# Shared instructions\n").unwrap();
+    std::fs::write(
+        shared.join("agent-home.toml"),
+        "schema = 1\n[team]\nname = \"Example\"\norg = \"Example\"\nenv_prefix = \"EX\"\nrole_prefix = \"ex-\"\n[profiles]\ndefault = \"developer\"\n",
+    ).unwrap();
+    std::fs::write(
+        roles.join("example.md"),
+        "---\nname: example\ndescription: Example.\n---\nPrompt.\n",
+    )
+    .unwrap();
+    let home = temp.path().join("home");
+    let target = home.join(".config/opencode/agents/ex-example.md");
+    install_shared(&home, None, "core", &shared).success();
+    std::fs::write(&target, "user edit\n").unwrap();
+    let output = install_shared(&home, None, "core", &shared)
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("recorded generated file was modified"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"user edit\n");
+    let backup_count = std::fs::read_dir(target.parent().unwrap())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .contains("vesica-backup")
+        })
+        .count();
+    assert_eq!(
+        backup_count, 0,
+        "failed reinstall creates no untracked backup"
+    );
+}
+
+#[test]
 fn uninstall_restores_a_preexisting_opencode_config_byte_for_byte() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
@@ -199,22 +538,20 @@ fn uninstall_restores_a_preexisting_opencode_config_byte_for_byte() {
     let original: &[u8] =
         b"{\n  // keep\n  \"theme\": \"tokyonight\",\n  \"instructions\": [\"~/old.md\"],\n}";
     std::fs::write(&config, original).unwrap();
-
-    install(&home, Some(&vault), "developer").success();
+    install_shared(&home, Some(&vault), "developer", &fixture_home()).success();
     assert_ne!(std::fs::read(&config).unwrap(), original, "install merged");
     uninstall(&home).success();
     assert_eq!(
         std::fs::read(&config).unwrap(),
         original,
-        "uninstall must restore the user's file byte-for-byte"
+        "uninstall must restore byte-for-byte"
     );
 }
-
 #[test]
 fn uninstall_removes_an_opencode_config_vesica_created_and_keeps_a_modified_one() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
-    install(&home, None, "core").success();
+    install_shared(&home, None, "core", &fixture_home()).success();
     assert!(opencode_config(&home).is_file());
     uninstall(&home).success();
     assert!(
@@ -224,7 +561,7 @@ fn uninstall_removes_an_opencode_config_vesica_created_and_keeps_a_modified_one(
 
     // A merged file the user edited afterwards is kept, and so is its manifest entry.
     let other = temp.path().join("home2");
-    install(&other, None, "core").success();
+    install_shared(&other, None, "core", &fixture_home()).success();
     let config = opencode_config(&other);
     std::fs::write(&config, "{\n  \"instructions\": [\"mine\"]\n}\n").unwrap();
     let out = uninstall(&other).success().get_output().clone();
