@@ -80,11 +80,9 @@ fn tree_snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, (String, Ve
 #[test]
 fn replaced_managed_file_ownership_matrix_retains_exact_entries_and_outside_nodes() {
     use std::os::unix::fs::symlink;
-    for relative in [
-        ".bashrc",
-        ".claude/CLAUDE.md",
-        ".codex/AGENTS.md",
-        ".config/opencode/opencode.json",
+    for (relative, expected_kind) in [
+        (".bashrc", "managed-block"),
+        (".config/opencode/opencode.json", "merged-file"),
     ] {
         for kind in ["same-link", "different-link", "dangling-link", "directory"] {
             let tmp = tempfile::tempdir().unwrap();
@@ -100,6 +98,7 @@ fn replaced_managed_file_ownership_matrix_retains_exact_entries_and_outside_node
             install(&root);
             let before_manifest = manifest(&root);
             let recorded = before_manifest["entries"][target.to_str().unwrap()].clone();
+            assert_eq!(recorded["kind"], expected_kind, "{relative}");
             assert!(recorded["backup"].is_string());
             let installed = std::fs::read(&target).unwrap();
             std::fs::remove_file(&target).unwrap();
@@ -118,8 +117,28 @@ fn replaced_managed_file_ownership_matrix_retains_exact_entries_and_outside_node
             } else {
                 symlink(&outside, &target).unwrap();
             }
-            uninstall(&root);
-            uninstall(&root);
+            for attempt in 0..2 {
+                let output = Command::cargo_bin("vesica")
+                    .unwrap()
+                    .arg("uninstall")
+                    .arg("--root")
+                    .arg(&root)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{relative}/{kind} attempt {attempt}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(
+                    stdout.contains(&format!(
+                        "Skipped replaced managed target: {}",
+                        target.display()
+                    )),
+                    "{relative}/{kind} attempt {attempt}: {stdout}"
+                );
+            }
             let retained = manifest(&root);
             assert_eq!(
                 retained["entries"][target.to_str().unwrap()],
