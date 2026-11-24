@@ -916,3 +916,568 @@ fn cli_share_excludes_independent_nested_repository_and_refuses_its_source() {
         "apply unrelated repository invariant including index and objects",
     );
 }
+
+#[test]
+fn personal_vault_writers_refuse_known_shared_storage_before_any_mutation() {
+    for selection in ["configured", "home-env", "team-env"] {
+        for operation in ["new-note", "fix", "init", "snapshot"] {
+            let fixture = Fixture::new();
+            if selection == "configured" {
+                let cfg = fixture.machine.join(".config/agent-home");
+                let local = ah_core::LocalConfig {
+                    home_repo: Some(fixture.shared.clone()),
+                    vault: Some(fixture.vault.clone()),
+                    ..Default::default()
+                };
+                local.write(&cfg).unwrap();
+            }
+            let target = if operation == "init" {
+                fixture.shared.join("new-personal")
+            } else {
+                fixture.shared.clone()
+            };
+            let before = tree(&fixture.shared);
+            let machine_before = tree(&fixture.machine);
+            let mut command =
+                fixture.cli(&["vault", operation, "--path", target.to_str().unwrap()]);
+            if operation == "new-note" {
+                command.args([
+                    "--task",
+                    "safety",
+                    "--agent",
+                    "test",
+                    "--date",
+                    "2026-11-24",
+                ]);
+            }
+            if selection == "home-env" {
+                command.env("VESICA_HOME_REPO", &fixture.shared);
+            }
+            if selection == "team-env" {
+                command.env("VESICA_TEAM_HOME", &fixture.shared);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                !output.status.success(),
+                "{operation}/{selection} accepted shared storage"
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("personal write target is inside shared-home storage"),
+                "{operation}/{selection}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            unchanged(&fixture.shared, &before, "shared storage refused exactly");
+            unchanged(&fixture.machine, &machine_before, "machine state unchanged");
+        }
+    }
+}
+
+#[test]
+fn personal_vault_scope_uses_selected_machine_root_and_preserves_normal_lifecycle() {
+    let fixture = Fixture::new();
+    let cfg = fixture.machine.join(".config/agent-home");
+    ah_core::LocalConfig {
+        home_repo: Some(fixture.shared.clone()),
+        ..Default::default()
+    }
+    .write(&cfg)
+    .unwrap();
+    let shared_before = tree(&fixture.shared);
+    for selector in ["flag", "env"] {
+        let target = fixture.shared.join(format!("absent-{selector}"));
+        let mut cmd = fixture.cli(&["vault", "init", "--path", target.to_str().unwrap()]);
+        cmd.env("HOME", &fixture.other);
+        if selector == "flag" {
+            cmd.arg("--root").arg(&fixture.machine);
+        } else {
+            cmd.env("VESICA_ROOT", &fixture.machine);
+        }
+        let out = cmd.output().unwrap();
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr)
+            .contains("personal write target is inside shared-home storage"));
+    }
+    let alias = fixture.temp.path().join("shared-alias");
+    std::os::unix::fs::symlink(&fixture.shared, &alias).unwrap();
+    let out = fixture
+        .cli(&[
+            "vault",
+            "init",
+            "--path",
+            fixture.shared.join("absent-alias").to_str().unwrap(),
+        ])
+        .env("VESICA_HOME_REPO", &alias)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(!fixture.shared.join("absent-alias").exists());
+    unchanged(&fixture.shared, &shared_before, "shared refusal matrix");
+    success(
+        &fixture
+            .cli(&["vault", "init", "--path", fixture.vault.to_str().unwrap()])
+            .output()
+            .unwrap(),
+    );
+    std::os::unix::fs::symlink(&fixture.shared, fixture.vault.join("Team")).unwrap();
+    let args = [
+        "vault",
+        "new-note",
+        "--path",
+        fixture.vault.to_str().unwrap(),
+        "--task",
+        "safety",
+        "--agent",
+        "test",
+        "--date",
+        "2026-11-24",
+    ];
+    success(&fixture.cli(&args).output().unwrap());
+    let before = tree(&fixture.vault);
+    assert!(!fixture.cli(&args).output().unwrap().status.success());
+    unchanged(&fixture.vault, &before, "exclusive ledger retry");
+    success(
+        &fixture
+            .cli(&[
+                "vault",
+                "snapshot",
+                "--path",
+                fixture.vault.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap(),
+    );
+    assert!(!git(&fixture.vault, &["ls-files"]).contains("Team"));
+    unchanged(
+        &fixture.shared,
+        &shared_before,
+        "normal vault lifecycle shared invariant",
+    );
+}
+
+#[test]
+fn personal_scope_refuses_symlinked_configuration_without_mutation() {
+    let fixture = Fixture::new();
+    let cfg = fixture.machine.join(".config/agent-home");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let outside = fixture.other.join("config.toml");
+    std::fs::write(&outside, "schema = 1\n").unwrap();
+    std::os::unix::fs::symlink(&outside, cfg.join("config.toml")).unwrap();
+    let before = tree(&fixture.other);
+    let out = fixture
+        .cli(&["vault", "init", "--path", fixture.vault.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("local configuration is not a regular file")
+    );
+    assert_eq!(std::fs::read_dir(&fixture.vault).unwrap().count(), 0);
+    unchanged(&fixture.other, &before, "local-config referent untouched");
+}
+
+#[test]
+fn personal_scope_resolves_symlink_dotdot_shared_selectors_before_exclusion() {
+    for selector in [
+        "configured",
+        "VESICA_HOME_REPO",
+        "AGENT_HOME_REPO",
+        "VESICA_TEAM_HOME",
+    ] {
+        let fixture = Fixture::new();
+        let outer = fixture.temp.path().join("outer");
+        std::fs::create_dir(&outer).unwrap();
+        let alias = outer.join("alias");
+        std::os::unix::fs::symlink(&fixture.shared, &alias).unwrap();
+        let shared_selector = alias.join("../shared");
+        assert_eq!(shared_selector.canonicalize().unwrap(), fixture.shared);
+        if selector == "configured" {
+            ah_core::LocalConfig {
+                home_repo: Some(shared_selector.clone()),
+                ..Default::default()
+            }
+            .write(&fixture.machine.join(".config/agent-home"))
+            .unwrap();
+        }
+        let before = tree(&fixture.shared);
+        let target = fixture.shared.join("missing-personal/deep");
+        let mut cmd = fixture.cli(&[
+            "vault",
+            "init",
+            "--path",
+            target.to_str().unwrap(),
+            "--dry-run",
+        ]);
+        if selector != "configured" {
+            cmd.env(selector, &shared_selector);
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            !out.status.success(),
+            "{selector} symlink/.. exclusion bypass: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(String::from_utf8_lossy(&out.stderr)
+            .contains("personal write target is inside shared-home storage"));
+        unchanged(&fixture.shared, &before, "symlink dotdot shared invariant");
+        assert!(!target.exists());
+    }
+}
+
+#[test]
+fn install_and_relink_refuse_shared_vault_before_machine_preparation() {
+    for operation in ["install", "dry-run", "relink"] {
+        for descendant in [false, true] {
+            let fixture = Fixture::new();
+            let target = if descendant {
+                fixture.shared.join("absent-personal")
+            } else {
+                fixture.shared.clone()
+            };
+            let before = tree(&fixture.shared);
+            let machine = tree(&fixture.machine);
+            let mut cmd = if operation == "relink" {
+                fixture.cli(&[
+                    "__update-relink",
+                    "--shared-home",
+                    fixture.shared.to_str().unwrap(),
+                    "--profile",
+                    "core",
+                ])
+            } else {
+                fixture.cli(&[
+                    "install",
+                    "--home-repo",
+                    fixture.shared.to_str().unwrap(),
+                    "--profile",
+                    "core",
+                ])
+            };
+            cmd.arg("--root")
+                .arg(&fixture.machine)
+                .arg("--vault")
+                .arg(&target);
+            if operation == "dry-run" {
+                cmd.arg("--dry-run");
+            }
+            let out = cmd.output().unwrap();
+            assert!(
+                !out.status.success(),
+                "{operation} descendant={descendant} accepted shared adoption"
+            );
+            assert!(
+                String::from_utf8_lossy(&out.stderr)
+                    .contains("personal write target is inside shared-home storage"),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            unchanged(&fixture.shared, &before, "install/relink shared invariant");
+            unchanged(
+                &fixture.machine,
+                &machine,
+                "refusal before state preparation",
+            );
+        }
+    }
+}
+
+#[test]
+fn personal_scope_honors_legacy_machine_root_and_primary_precedence() {
+    let fixture = Fixture::new();
+    ah_core::LocalConfig {
+        home_repo: Some(fixture.shared.clone()),
+        ..Default::default()
+    }
+    .write(&fixture.machine.join(".config/agent-home"))
+    .unwrap();
+    let before = tree(&fixture.shared);
+    for selector in ["legacy", "primary-over-legacy", "flag-over-env"] {
+        let target = fixture.shared.join(format!("absent-{selector}"));
+        let mut cmd = fixture.cli(&[
+            "vault",
+            "init",
+            "--path",
+            target.to_str().unwrap(),
+            "--dry-run",
+        ]);
+        cmd.env("HOME", &fixture.other);
+        match selector {
+            "legacy" => {
+                cmd.env("AGENT_HOME_ROOT", &fixture.machine);
+            }
+            "primary-over-legacy" => {
+                cmd.env("VESICA_ROOT", &fixture.machine)
+                    .env("AGENT_HOME_ROOT", "/dev/null");
+            }
+            _ => {
+                cmd.arg("--root")
+                    .arg(&fixture.machine)
+                    .env("VESICA_ROOT", "/dev/null")
+                    .env("AGENT_HOME_ROOT", "/dev/null");
+            }
+        }
+        let out = cmd.output().unwrap();
+        assert!(!out.status.success(), "{selector} ignored machine root");
+        assert!(
+            String::from_utf8_lossy(&out.stderr)
+                .contains("personal write target is inside shared-home storage"),
+            "{selector}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!target.exists());
+    }
+    unchanged(&fixture.shared, &before, "root precedence shared invariant");
+}
+
+#[test]
+fn snapshot_refuses_target_alias_dotdot_before_git_mutation() {
+    let fixture = Fixture::new();
+    // Make the synthetic shared repository snapshot-eligible so a refusal cannot
+    // come from missing Team exclusion or malformed notes.
+    std::fs::write(fixture.shared.join(".gitignore"), "/Team\n").unwrap();
+    git(&fixture.shared, &["add", ".gitignore"]);
+    git(&fixture.shared, &["commit", "-qm", "exclude Team"]);
+    std::fs::write(fixture.shared.join("private-reader.md"), NOTE).unwrap();
+    let outer = fixture.temp.path().join("outer");
+    std::fs::create_dir(&outer).unwrap();
+    let alias = outer.join("alias");
+    std::os::unix::fs::symlink(&fixture.shared, &alias).unwrap();
+    let selected = alias.join("../shared");
+    assert_eq!(selected.canonicalize().unwrap(), fixture.shared);
+    let before = tree(&fixture.shared);
+    let out = fixture
+        .cli(&["vault", "snapshot", "--path", selected.to_str().unwrap()])
+        .env("VESICA_HOME_REPO", &fixture.shared)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "snapshot accepted aliased shared target: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    unchanged(
+        &fixture.shared,
+        &before,
+        "aliased snapshot refuses before Git mutation",
+    );
+}
+
+#[test]
+fn ledger_refuses_known_shared_storage_nested_inside_personal_root() {
+    for shared_relative in ["Sessions", "Sessions/agent-runs"] {
+        let fixture = Fixture::new();
+        let shared = fixture.vault.join(shared_relative);
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("sentinel.md"), NOTE).unwrap();
+        git(&shared, &["init", "-q", "-b", "main"]);
+        git(&shared, &["add", "."]);
+        git(&shared, &["commit", "-qm", "nested shared baseline"]);
+        ah_core::LocalConfig {
+            home_repo: Some(shared.clone()),
+            ..Default::default()
+        }
+        .write(&fixture.machine.join(".config/agent-home"))
+        .unwrap();
+        let before = tree(&shared);
+        let out = fixture
+            .cli(&[
+                "vault",
+                "new-note",
+                "--path",
+                fixture.vault.to_str().unwrap(),
+                "--task",
+                "safety",
+                "--agent",
+                "test",
+                "--date",
+                "2026-11-24",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "ledger accepted known shared {shared_relative}"
+        );
+        unchanged(&shared, &before, "nested known shared storage untouched");
+    }
+}
+
+// Every personal writer shares the same early preflight, including installer adoption.
+fn personal_scope_command(fixture: &Fixture, operation: &str, target: &Path) -> Command {
+    let mut cmd = match operation {
+        "install" | "dry-run" => fixture.cli(&[
+            "install",
+            "--home-repo",
+            fixture.shared.to_str().unwrap(),
+            "--profile",
+            "core",
+        ]),
+        "relink" => fixture.cli(&[
+            "__update-relink",
+            "--shared-home",
+            fixture.shared.to_str().unwrap(),
+            "--profile",
+            "core",
+        ]),
+        _ => fixture.cli(&["vault", operation]),
+    };
+    cmd.arg("--root").arg(&fixture.machine);
+    if matches!(operation, "install" | "dry-run" | "relink") {
+        cmd.arg("--vault").arg(target);
+    } else {
+        cmd.arg("--path").arg(target);
+    }
+    if operation == "dry-run" {
+        cmd.arg("--dry-run");
+    }
+    if operation == "new-note" {
+        cmd.args([
+            "--task",
+            "safety",
+            "--agent",
+            "test",
+            "--date",
+            "2026-11-24",
+        ]);
+    }
+    cmd
+}
+
+#[test]
+fn all_personal_callers_refuse_raw_target_traversal_and_symlinks_before_preparation() {
+    for operation in [
+        "init", "fix", "new-note", "snapshot", "install", "dry-run", "relink",
+    ] {
+        for spelling in ["alias-dotdot", "alias", "plain-dotdot"] {
+            let fixture = Fixture::new();
+            let outer = fixture.temp.path().join("outer");
+            std::fs::create_dir(&outer).unwrap();
+            let alias = outer.join("alias");
+            std::os::unix::fs::symlink(&fixture.shared, &alias).unwrap();
+            let selected = match spelling {
+                "alias-dotdot" => alias.join("../shared"),
+                "alias" => alias,
+                _ => outer.join("../shared"),
+            };
+            assert_eq!(selected.canonicalize().unwrap(), fixture.shared);
+            let before = tree(&fixture.shared);
+            let machine = tree(&fixture.machine);
+            let out = personal_scope_command(&fixture, operation, &selected)
+                .env("VESICA_HOME_REPO", &fixture.shared)
+                .output()
+                .unwrap();
+            assert!(!out.status.success(), "{operation} accepted {spelling}");
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                stderr.contains(if spelling == "alias" {
+                    "vault path contains a symlink component"
+                } else {
+                    "personal vault path must not contain parent traversal"
+                }),
+                "{operation}/{spelling}: {stderr}"
+            );
+            unchanged(&fixture.shared, &before, "raw-path shared invariant");
+            unchanged(
+                &fixture.machine,
+                &machine,
+                "raw-path refusal before machine preparation",
+            );
+        }
+    }
+}
+
+#[test]
+fn all_personal_callers_refuse_known_non_team_nested_storage_real_or_missing() {
+    for source in [
+        "configured",
+        "VESICA_HOME_REPO",
+        "AGENT_HOME_REPO",
+        "VESICA_TEAM_HOME",
+    ] {
+        for real in [false, true] {
+            for relative in ["Sessions/agent-runs", "Archive", "Teamwork"] {
+                let fixture = Fixture::new();
+                let nested = fixture.vault.join(relative);
+                if real {
+                    std::fs::create_dir_all(&nested).unwrap();
+                    std::fs::write(nested.join("sentinel.md"), NOTE).unwrap();
+                }
+                if source == "configured" {
+                    ah_core::LocalConfig {
+                        home_repo: Some(nested.clone()),
+                        ..Default::default()
+                    }
+                    .write(&fixture.machine.join(".config/agent-home"))
+                    .unwrap();
+                }
+                let before = tree(&fixture.vault);
+                let machine = tree(&fixture.machine);
+                for operation in [
+                    "init", "fix", "new-note", "snapshot", "install", "dry-run", "relink",
+                ] {
+                    let mut cmd = personal_scope_command(&fixture, operation, &fixture.vault);
+                    if source != "configured" {
+                        cmd.env(source, &nested);
+                    }
+                    let out = cmd.output().unwrap();
+                    assert!(
+                        !out.status.success(),
+                        "{operation} accepted {source}/{relative}, real={real}"
+                    );
+                    assert!(
+                        String::from_utf8_lossy(&out.stderr)
+                            .contains("shared-home storage is nested outside"),
+                        "{operation}/{source}/{relative}: {}",
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                    unchanged(
+                        &fixture.vault,
+                        &before,
+                        "known nested storage and personal vault untouched",
+                    );
+                    unchanged(
+                        &fixture.machine,
+                        &machine,
+                        "nested refusal before machine preparation",
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn personal_lifecycle_preserves_real_team_nested_storage() {
+    for relative in ["Team", "Team/shared"] {
+        let fixture = Fixture::new();
+        let nested = fixture.vault.join(relative);
+        copy_tree(&fixture.shared, &nested);
+        ah_core::LocalConfig {
+            home_repo: Some(nested.clone()),
+            ..Default::default()
+        }
+        .write(&fixture.machine.join(".config/agent-home"))
+        .unwrap();
+        let before = tree(&fixture.vault.join("Team"));
+        // A plain relative selector must still pass the new boundary preflight.
+        let out = personal_scope_command(&fixture, "fix", Path::new("vault"))
+            .arg("--dry-run")
+            .current_dir(fixture.temp.path())
+            .output()
+            .unwrap();
+        success(&out);
+        for operation in ["fix", "new-note", "snapshot"] {
+            let mut cmd = personal_scope_command(&fixture, operation, Path::new("vault"));
+            cmd.current_dir(fixture.temp.path());
+            success(&cmd.output().unwrap());
+            unchanged(
+                &fixture.vault.join("Team"),
+                &before,
+                "Team-only nesting stays excluded",
+            );
+        }
+        assert!(!git(&fixture.vault, &["ls-files"])
+            .lines()
+            .any(|line| line.starts_with("Team/")));
+    }
+}

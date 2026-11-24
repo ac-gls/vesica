@@ -181,3 +181,27 @@ Beyond the blocker rows above:
 - **Tests fail in a sandbox with `/tmp` mounted `noexec`.** Some tests execute small stub programs from temporary directories. Set `TMPDIR` (Rust tests) and `VESICA_TEST_TMP_ROOT` (shell tests) to an exec-capable directory. `tests/install.sh` detects this case and says so.
 - **`content-guard` fails.** The public app repository must not contain team content. The rule ID (`VCG001`–`VCG005`) and the file:line tell you what to remove. Team material belongs in the private shared home.
 - **`supply-chain` fails.** A dependency has a RustSec advisory or a licence outside `deny.toml`. Prefer replacing the dependency over adding an ignore.
+
+## Personal vault write boundaries
+
+`vault init`, `fix`, `new-note`, `snapshot`, and install/update re-link adoption
+refuse personal paths containing `..` or existing symlink components before
+personal writes or installer machine preparation. Use a direct, real-directory
+path; ordinary relative paths without parent traversal remain supported.
+
+Personal storage must be separate from every known shared-home root. When shared
+storage is inside the personal vault, it must be under `<personal>/Team`, the
+subtree excluded from personal upkeep and snapshots. A known shared root under
+`Sessions`, `Archive`, or any other non-`Team` subtree is refused, even when that
+shared directory has not been created yet. Choose separate storage or relocate
+shared storage under `Team` yourself; Vesica does not move or delete it for you.
+
+The check considers the selected machine's local `home_repo`, all of
+`VESICA_HOME_REPO`, `AGENT_HOME_REPO`, `VESICA_TEAM_HOME`, and the explicitly
+selected install/re-link shared root. An override does not hide another known
+shared boundary. For standalone writers, `--root` selects machine configuration
+with precedence over `VESICA_ROOT`, then `AGENT_HOME_ROOT`, then `HOME`.
+
+These are conservative metadata checks, not an atomic no-follow guarantee against
+concurrent filesystem replacement. Keep real/private data out of disposable trials
+until the separate rollout gates have been accepted.

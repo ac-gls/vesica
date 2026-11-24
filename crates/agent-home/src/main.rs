@@ -319,6 +319,12 @@ struct VaultOptions {
 struct VaultPath {
     #[arg(long, env = "VESICA_VAULT", help = "Personal vault directory")]
     path: PathBuf,
+    #[arg(
+        long,
+        env = "VESICA_ROOT",
+        help = "Machine configuration root (fallback: AGENT_HOME_ROOT, then HOME)"
+    )]
+    root: Option<PathBuf>,
 }
 #[derive(Debug, Subcommand)]
 enum VaultCommand {
@@ -1412,11 +1418,116 @@ fn utc_date() -> String {
     format!("{}-{}-{}", &stamp[0..4], &stamp[4..6], &stamp[6..8])
 }
 
+/// Personal writers must not treat known shared storage as a personal root. Consider all
+/// configured/env sources, not just the winning resolver layer, so an override cannot hide
+/// another known shared boundary. Canonicalize missing suffixes without creating them.
+fn canonical_shared_storage(path: &Path) -> Result<PathBuf> {
+    // Resolve symlink/.. with filesystem semantics first. Only missing normal suffixes
+    // may be appended lexically; dangling markers and unresolved traversal fail closed.
+    let mut ancestor = std::path::absolute(path)?;
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::canonicalize(&ancestor) {
+            Ok(mut resolved) => {
+                for part in missing.iter().rev() {
+                    resolved.push(part);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if std::fs::symlink_metadata(&ancestor).is_ok() {
+                    anyhow::bail!("cannot resolve shared-home storage: {}", ancestor.display());
+                }
+                let Some(std::path::Component::Normal(part)) = ancestor.components().next_back()
+                else {
+                    anyhow::bail!(
+                        "cannot safely resolve shared-home storage: {}",
+                        path.display()
+                    );
+                };
+                missing.push(part.to_os_string());
+                ancestor.pop();
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("resolving shared-home storage {}", path.display()))
+            }
+        }
+    }
+}
+
+fn validate_personal_write_scope(vault: &VaultPath) -> Result<()> {
+    // clap already applies --root > VESICA_ROOT. Its repeated env setters do not
+    // define aliases, so preserve legacy AGENT_HOME_ROOT explicitly before HOME.
+    let machine = vault
+        .root
+        .clone()
+        .or_else(|| std::env::var_os("AGENT_HOME_ROOT").map(PathBuf::from));
+    validate_personal_storage(&vault.path, &config_dir(machine.as_deref())?, None)
+}
+
+fn validate_personal_storage(
+    path: &Path,
+    cfg: &Path,
+    selected_shared: Option<&Path>,
+) -> Result<()> {
+    // Inspect the raw personal selector before helpers can erase symlink/.. semantics.
+    // All callers keep this same selector for I/O, so traversal is refused, not rewritten.
+    if path
+        .components()
+        .any(|part| part == std::path::Component::ParentDir)
+    {
+        anyhow::bail!(
+            "personal vault path must not contain parent traversal (..): {}",
+            path.display()
+        );
+    }
+    let target = std::path::absolute(path)?;
+    reject_symlink_components(&target)?;
+    reject_symlink_components(cfg)?;
+    let config_path = ah_core::LocalConfig::path_in(cfg);
+    match std::fs::symlink_metadata(&config_path) {
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
+            anyhow::bail!(
+                "local configuration is not a regular file: {}",
+                config_path.display()
+            );
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let local = ah_core::LocalConfig::load(cfg)?;
+    let target = canonical_path_with_missing(&target)?;
+    let shared_paths = local
+        .home_repo
+        .into_iter()
+        .chain(selected_shared.map(Path::to_path_buf))
+        .chain(
+            ["VESICA_HOME_REPO", "AGENT_HOME_REPO", "VESICA_TEAM_HOME"]
+                .into_iter()
+                .filter_map(|key| std::env::var_os(key).map(PathBuf::from)),
+        );
+    for shared in shared_paths {
+        let shared = canonical_shared_storage(&shared)?;
+        if target.starts_with(&shared) {
+            anyhow::bail!("personal write target is inside shared-home storage: {}; choose a separate personal vault with --path", target.display());
+        }
+        // Team is the existing excluded subtree. A real nested shared directory
+        // anywhere else would be writable by fix/new-note or eligible for snapshot.
+        if shared.starts_with(&target) && !shared.starts_with(target.join("Team")) {
+            anyhow::bail!("shared-home storage is nested outside the personal vault's excluded Team subtree: {}; use separate storage or place shared storage under <personal>/Team", shared.display());
+        }
+    }
+    Ok(())
+}
+
 fn vault(command: VaultCommand) -> Result<()> {
     use ah_vault::personal;
     let print_changes = print_vault_changes;
     match command {
         VaultCommand::Init { vault, dry_run } => {
+            validate_personal_write_scope(&vault)?;
             let changes = personal::init(&vault.path, &utc_date(), dry_run)?;
             print_changes(&changes, dry_run);
             if !dry_run {
@@ -1424,6 +1535,7 @@ fn vault(command: VaultCommand) -> Result<()> {
             }
         }
         VaultCommand::Fix { vault, dry_run } => {
+            validate_personal_write_scope(&vault)?;
             let changes = personal::fix(&vault.path, &utc_date(), dry_run)?;
             if !print_changes(&changes, dry_run) {
                 println!("Nothing to fix: {}", vault.path.display());
@@ -1451,6 +1563,7 @@ fn vault(command: VaultCommand) -> Result<()> {
             area,
             title,
         } => {
+            validate_personal_write_scope(&vault)?;
             let date = date.unwrap_or_else(utc_date);
             let rel = personal::new_note(
                 &vault.path,
@@ -1465,6 +1578,7 @@ fn vault(command: VaultCommand) -> Result<()> {
             println!("Created ledger note: {rel}");
         }
         VaultCommand::Snapshot { vault, message } => {
+            validate_personal_write_scope(&vault)?;
             let message = message.unwrap_or_else(|| {
                 format!("vault snapshot {}", utc_stamp(std::time::SystemTime::now()))
             });
@@ -1929,6 +2043,11 @@ where
     let options = Options { home_repo, profile };
     let resolved = resolve_home_repo(&options, root.as_deref())?;
     let vault = vault.or_else(|| resolved.local.vault.clone());
+    if let Some(vault) = &vault {
+        // Covers both ordinary install and the new-executable relink caller before
+        // machine preparation, backups, actions or personal scaffolding.
+        validate_personal_storage(vault, &resolved.config_dir, Some(&resolved.home_repo))?;
+    }
     let (c, _) = load(&resolved.home_repo, &resolved.local)?;
     let selected = profile
         .map(ProfileArg::text)
