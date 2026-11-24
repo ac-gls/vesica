@@ -6,7 +6,7 @@
 
 use anyhow::Context;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 const AGENTS: &str = include_str!("../../../assets/vault-skeleton/personal-AGENTS.md");
 const CLAUDE: &str = include_str!("../../../assets/vault-skeleton/CLAUDE.md");
@@ -68,14 +68,88 @@ fn exists(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
 }
 
+/// Reject symlinked or non-directory root ancestors before any personal mutation.
+fn validate_root_chain(path: &Path) -> anyhow::Result<()> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut current = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                anyhow::bail!("vault root must not contain traversal components")
+            }
+            std::path::Component::CurDir => continue,
+            _ => current.push(component.as_os_str()),
+        }
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                anyhow::bail!("{} is not a real directory", current.display())
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn require_real_directory(path: &Path) -> anyhow::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("cannot inspect vault directory {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        anyhow::bail!("{} is not a real directory", path.display());
+    }
+    Ok(())
+}
+
+/// Check every existing path component without following symlinks. Missing suffixes are allowed
+/// during preflight because init/fix may create them later.
+fn validate_directory_chain(root: &Path, relative: &Path) -> anyhow::Result<()> {
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            anyhow::bail!("invalid vault directory path {}", relative.display());
+        };
+        current.push(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                anyhow::bail!("{} is not a real directory", current.display());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn reject_symlink_or_unexpected_file(path: &Path) -> anyhow::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            anyhow::bail!("{} is not a regular file", path.display());
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn is_git_root(vault: &Path) -> bool {
     exists(&vault.join(".git"))
 }
 
 /// Create a new vault from the skeleton. Refuses unless `vault` is absent or an empty directory.
 pub fn init(vault: &Path, date: &str, dry_run: bool) -> anyhow::Result<Vec<VaultChange>> {
+    validate_root_chain(vault)?;
     if exists(vault) {
-        let empty = vault.is_dir() && std::fs::read_dir(vault)?.next().is_none();
+        let metadata = std::fs::symlink_metadata(vault)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            anyhow::bail!("{} is not a real directory", vault.display());
+        }
+        let empty = std::fs::read_dir(vault)?.next().is_none();
         if !empty {
             anyhow::bail!(
                 "{} already exists and is not empty; use `vesica vault fix --path {}` to adopt an existing folder",
@@ -105,11 +179,19 @@ pub fn init(vault: &Path, date: &str, dry_run: bool) -> anyhow::Result<Vec<Vault
 /// Adopt an existing folder: add only what is missing, never overwrite, and make sure `/Team`
 /// is excluded from the vault repository.
 pub fn fix(vault: &Path, date: &str, dry_run: bool) -> anyhow::Result<Vec<VaultChange>> {
+    validate_root_chain(vault)?;
     if !vault.is_dir() {
         anyhow::bail!(
             "{} is not a directory; use `vesica vault init` to create a vault",
             vault.display()
         );
+    }
+    require_real_directory(vault)?;
+    for (name, _) in skeleton_files(date) {
+        reject_symlink_or_unexpected_file(&vault.join(name))?;
+    }
+    for dir in DIRECTORIES {
+        validate_directory_chain(vault, Path::new(dir))?;
     }
     let mut changes = Vec::new();
     for (name, _) in skeleton_files(date) {
@@ -147,11 +229,33 @@ fn excludes_team(gitignore: &str) -> bool {
 }
 
 fn apply(vault: &Path, date: &str, changes: &[VaultChange]) -> anyhow::Result<()> {
+    require_real_directory(vault)?;
+    for (name, _) in skeleton_files(date) {
+        reject_symlink_or_unexpected_file(&vault.join(name))?;
+    }
+    for dir in DIRECTORIES {
+        validate_directory_chain(vault, Path::new(dir))?;
+    }
     let files = skeleton_files(date);
     for change in changes {
         match change {
             VaultChange::Create(name) if name.ends_with('/') => {
-                std::fs::create_dir_all(vault.join(name))?
+                let relative = Path::new(name.trim_end_matches('/'));
+                validate_directory_chain(vault, relative)?;
+                let mut current = vault.to_path_buf();
+                for component in relative.components() {
+                    let std::path::Component::Normal(component) = component else {
+                        anyhow::bail!("invalid vault directory path {name}");
+                    };
+                    current.push(component);
+                    match std::fs::create_dir(&current) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                            require_real_directory(&current)?;
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
             }
             VaultChange::Create(name) => {
                 let (_, content) = files
@@ -162,6 +266,7 @@ fn apply(vault: &Path, date: &str, changes: &[VaultChange]) -> anyhow::Result<()
             }
             VaultChange::ExcludeTeam => {
                 let path = vault.join(".gitignore");
+                reject_symlink_or_unexpected_file(&path)?;
                 let mut text = std::fs::read_to_string(&path)?;
                 if !text.is_empty() && !text.ends_with('\n') {
                     text.push('\n');
@@ -263,17 +368,15 @@ fn team_exclusion_problem(vault: &Path) -> anyhow::Result<Option<&'static str>> 
     // when absent it is checked as a file, which only `/Team` or `Team` covers.
     {
         let path = "Team";
-        let ignored = Command::new("git")
-            .arg("-C")
-            .arg(vault)
-            .args(["check-ignore", "-q", "--no-index", "--", path])
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?
-            .success();
+        let ignored = crate::git::command(
+            vault,
+            &["check-ignore", "-q", "--no-index", "--", path],
+            true,
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?
+        .success();
         if !ignored {
             return Ok(Some(
                 "Team is not excluded by .gitignore; add a line `/Team` (run `vesica vault fix`)",
@@ -392,6 +495,7 @@ pub struct LedgerNote<'a> {
 
 /// Create a ledger note from the embedded template; never overwrites. Returns the relative path.
 pub fn new_note(vault: &Path, note: &LedgerNote) -> anyhow::Result<String> {
+    validate_root_chain(vault)?;
     for (what, value) in [
         ("task", note.task),
         ("agent", note.agent),
@@ -428,8 +532,28 @@ pub fn new_note(vault: &Path, note: &LedgerNote) -> anyhow::Result<String> {
         "Sessions/agent-runs/{}_{}_{}.md",
         note.date, note.task, note.agent
     );
-    let path = vault.join(&rel);
-    std::fs::create_dir_all(path.parent().context("note path has no parent")?)?;
+    let root = vault.canonicalize().context("cannot resolve vault path")?;
+    require_real_directory(&root)?;
+    let mut parent = root.clone();
+    for component in ["Sessions", "agent-runs"] {
+        parent.push(component);
+        match std::fs::symlink_metadata(&parent) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                anyhow::bail!(
+                    "ledger directory {} is not a real directory",
+                    parent.display()
+                );
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&parent).with_context(|| {
+                    format!("cannot create ledger directory {}", parent.display())
+                })?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let path = parent.join(format!("{}_{}_{}.md", note.date, note.task, note.agent));
     if exists(&path) {
         anyhow::bail!("{rel} already exists; ledger notes are never overwritten");
     }
@@ -476,6 +600,7 @@ pub enum SnapshotOutcome {
 /// `Team` is not excluded or already tracked, and when a file to be committed matches a secret
 /// pattern (reported by path and line only). Uses the person's own Git identity and config.
 pub fn snapshot(vault: &Path, message: &str) -> anyhow::Result<SnapshotOutcome> {
+    crate::git::validate_mutation_repository(vault)?;
     if !is_git_root(vault) {
         anyhow::bail!(
             "{} is not a Git repository; run `vesica vault fix --path {}` first",

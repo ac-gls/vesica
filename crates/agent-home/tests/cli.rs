@@ -450,6 +450,837 @@ fn install_fails_closed_on_a_collision_without_creating_backups_or_other_changes
 }
 
 #[test]
+fn uninstall_rejects_legacy_relative_manifest_targets_before_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .arg("--root")
+        .arg(&root)
+        .assert()
+        .success();
+    let manifest_path = root.join(".config/agent-home/manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    let (key, entry) = manifest["entries"]
+        .as_object_mut()
+        .unwrap()
+        .iter_mut()
+        .next()
+        .unwrap();
+    let target = PathBuf::from(entry["target"].as_str().unwrap());
+    *entry.get_mut("target").unwrap() =
+        serde_json::Value::String(target.file_name().unwrap().to_string_lossy().into_owned());
+    let key = key.clone();
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let original_manifest = std::fs::read(&manifest_path).unwrap();
+    let team_link = root.join("Team");
+    assert!(team_link.is_symlink());
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not absolute"));
+
+    assert!(
+        team_link.is_symlink(),
+        "uninstall must fail before mutation"
+    );
+    assert_eq!(std::fs::read(&manifest_path).unwrap(), original_manifest);
+    assert!(manifest["entries"].get(&key).is_some());
+}
+
+#[test]
+fn install_persists_absolute_manifest_paths_for_a_relative_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = PathBuf::from("relative-home");
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .arg("--root")
+        .arg(&root)
+        .assert()
+        .success();
+
+    let manifest_path = temp
+        .path()
+        .join(&root)
+        .join(".config/agent-home/manifest.json");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    for (key, entry) in manifest["entries"].as_object().unwrap() {
+        let target = PathBuf::from(entry["target"].as_str().unwrap());
+        assert!(
+            target.is_absolute(),
+            "manifest target for {key} must be absolute: {target:?}"
+        );
+        if let Some(backup) = entry["backup"].as_str() {
+            assert!(
+                PathBuf::from(backup).is_absolute(),
+                "manifest backup for {key} must be absolute: {backup}"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+fn install_with_symlinked_config_ancestor() -> (tempfile::TempDir, PathBuf, PathBuf, Vec<u8>) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .success();
+
+    let config = root.join(".config");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::rename(&config, outside.join(".config")).unwrap();
+    let manifest_path = outside.join(".config/agent-home/manifest.json");
+    let manifest = std::fs::read(&manifest_path).unwrap();
+    let sentinel = outside.join("opencode/opencode.json");
+    std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+    std::fs::write(&sentinel, b"{\"user\": true}\n").unwrap();
+    std::os::unix::fs::symlink(outside.join(".config"), &config).unwrap();
+    (temp, root, sentinel, manifest)
+}
+
+#[cfg(unix)]
+#[test]
+fn uninstall_rejects_symlinked_config_ancestor_before_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    std::fs::create_dir_all(&root).unwrap();
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::create_dir_all(outside.join("agent-home")).unwrap();
+    let manifest = root.join(".config/agent-home/manifest.json");
+    let sentinel = outside.join("outside-sentinel");
+    std::fs::write(&sentinel, b"unchanged\n").unwrap();
+    std::os::unix::fs::symlink(&outside, root.join(".config")).unwrap();
+    let hostile_manifest = serde_json::json!({
+        "schema": 1,
+        "app_version": "0.1.0-alpha.4",
+        "shared_home": fixture_home().canonicalize().unwrap(),
+        "profile": "core",
+        "vault": null,
+        "entries": {
+            sentinel.to_string_lossy().as_ref(): {
+                "kind": "managed-block",
+                "target": sentinel,
+                "source": null,
+                "backup": null,
+                "original_sha256": null,
+                "installed_sha256": null
+            }
+        }
+    });
+    std::fs::write(
+        &manifest,
+        serde_json::to_vec_pretty(&hostile_manifest).unwrap(),
+    )
+    .unwrap();
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "managed config directory resolves outside the selected root",
+        ));
+
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"unchanged\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn install_rejects_symlinked_manifest_path_ancestor_before_mutation() {
+    let (_temp, root, sentinel, manifest) = install_with_symlinked_config_ancestor();
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "managed config directory resolves outside the selected root",
+        ));
+
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"{\"user\": true}\n");
+    assert_eq!(
+        std::fs::read(root.join(".config/agent-home/manifest.json")).unwrap(),
+        manifest
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn prune_rejects_symlinked_manifest_path_ancestor_before_mutation() {
+    let (_temp, root, sentinel, manifest) = install_with_symlinked_config_ancestor();
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "managed config directory resolves outside the selected root",
+        ));
+
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"{\"user\": true}\n");
+    assert_eq!(
+        std::fs::read(root.join(".config/agent-home/manifest.json")).unwrap(),
+        manifest
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn uninstall_rejects_symlinked_manifest_path_ancestor_before_mutation() {
+    let (_temp, root, sentinel, manifest) = install_with_symlinked_config_ancestor();
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "managed config directory resolves outside the selected root",
+        ));
+
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"{\"user\": true}\n");
+    assert_eq!(
+        std::fs::read(root.join(".config/agent-home/manifest.json")).unwrap(),
+        manifest
+    );
+}
+
+#[cfg(unix)]
+fn add_hostile_manifest_symlink(root: &std::path::Path, target: &std::path::Path) -> Vec<u8> {
+    use std::os::unix::fs::symlink;
+
+    let manifest_path = root.join(".config/agent-home/manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    let shared = manifest["shared_home"].as_str().unwrap().to_owned();
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    symlink(&shared, target).unwrap();
+    manifest["entries"][target.to_string_lossy().as_ref()] = serde_json::json!({
+        "kind": "symlink",
+        "target": target,
+        "source": shared,
+        "backup": null,
+        "original_sha256": null,
+        "installed_sha256": null
+    });
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    std::fs::read(manifest_path).unwrap()
+}
+
+fn add_hostile_manifest_backup(root: &std::path::Path, backup: &std::path::Path) -> Vec<u8> {
+    let manifest_path = root.join(".config/agent-home/manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    let entry = manifest["entries"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+        .next()
+        .unwrap();
+    entry["backup"] = serde_json::Value::String(backup.to_string_lossy().into_owned());
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    std::fs::read(manifest_path).unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn install_rejects_external_manifest_backup_before_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .success();
+    let manifest = add_hostile_manifest_backup(&root, &temp.path().join("outside/backup"));
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("backup escapes"));
+
+    assert!(root.join("Team").is_symlink());
+    assert_eq!(
+        std::fs::read(root.join(".config/agent-home/manifest.json")).unwrap(),
+        manifest
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn uninstall_rejects_external_manifest_backup_before_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .success();
+    let manifest = add_hostile_manifest_backup(&root, &temp.path().join("outside/backup"));
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("backup escapes"));
+
+    assert!(root.join("Team").is_symlink());
+    assert_eq!(
+        std::fs::read(root.join(".config/agent-home/manifest.json")).unwrap(),
+        manifest
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn prune_rejects_external_manifest_backup_before_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .success();
+    let manifest = add_hostile_manifest_backup(&root, &temp.path().join("outside/backup"));
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("backup escapes"));
+
+    assert!(root.join("Team").is_symlink());
+    assert_eq!(
+        std::fs::read(root.join(".config/agent-home/manifest.json")).unwrap(),
+        manifest
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn uninstall_rejects_manifest_vault_team_escape_before_removal() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .success();
+
+    let shared_home = fixture_home().canonicalize().unwrap();
+    let outside_vault = temp.path().join("outside-vault");
+    std::fs::create_dir_all(&outside_vault).unwrap();
+    let outside_team = outside_vault.join("Team");
+    symlink(&shared_home, &outside_team).unwrap();
+
+    let manifest_path = root.join(".config/agent-home/manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["vault"] = serde_json::Value::String(outside_vault.to_string_lossy().into_owned());
+    manifest["entries"][outside_team.to_string_lossy().as_ref()] = serde_json::json!({
+        "kind": "symlink",
+        "target": outside_team,
+        "source": shared_home,
+        "backup": null,
+        "original_sha256": null,
+        "installed_sha256": null
+    });
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let malicious_manifest = std::fs::read(&manifest_path).unwrap();
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "manifest vault is not authorized by local config",
+        ));
+
+    assert!(outside_team.is_symlink(), "outside Team link must remain");
+    assert_eq!(std::fs::read(&manifest_path).unwrap(), malicious_manifest);
+}
+
+#[cfg(unix)]
+#[test]
+fn install_allows_external_vault_and_persists_authorization_for_uninstall() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    let vault = temp.path().join("outside-vault");
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .args(["--vault"])
+        .arg(&vault)
+        .assert()
+        .success();
+
+    let config = std::fs::read_to_string(root.join(".config/agent-home/config.toml")).unwrap();
+    assert!(
+        config.contains(&format!("vault = \"{}\"", vault.display())),
+        "{config}"
+    );
+    let team_link = vault.join("Team");
+    assert!(team_link.is_symlink());
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .assert()
+        .success();
+    assert!(!team_link.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn external_vault_path_with_symlinked_ancestor_is_rejected_before_mutation() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    let real_parent = temp.path().join("real-parent");
+    std::fs::create_dir(&real_parent).unwrap();
+    let alias = temp.path().join("alias");
+    symlink(&real_parent, &alias).unwrap();
+    let vault = alias.join("vault");
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .args(["--vault"])
+        .arg(&vault)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("symlink"));
+
+    assert!(!root.exists(), "refusal must precede machine-root mutation");
+    assert!(!real_parent.join("vault").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn uninstall_rejects_symlinked_local_config_as_vault_authorization() {
+    use std::os::unix::fs::{symlink, symlink as symlink_file};
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .success();
+
+    let shared = fixture_home().canonicalize().unwrap();
+    let outside_vault = temp.path().join("outside-vault");
+    std::fs::create_dir_all(&outside_vault).unwrap();
+    let outside_team = outside_vault.join("Team");
+    symlink(&shared, &outside_team).unwrap();
+    let manifest_path = root.join(".config/agent-home/manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["vault"] = serde_json::Value::String(outside_vault.to_string_lossy().into_owned());
+    manifest["entries"][outside_team.to_string_lossy().as_ref()] = serde_json::json!({
+        "kind": "symlink", "target": outside_team, "source": shared,
+        "backup": null, "original_sha256": null, "installed_sha256": null
+    });
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let manifest_before = std::fs::read(&manifest_path).unwrap();
+
+    let config_path = root.join(".config/agent-home/config.toml");
+    std::fs::remove_file(&config_path).unwrap();
+    let attacker_config = temp.path().join("attacker-config.toml");
+    std::fs::write(
+        &attacker_config,
+        format!("schema = 1\nvault = \"{}\"\n", outside_vault.display()),
+    )
+    .unwrap();
+    symlink_file(&attacker_config, &config_path).unwrap();
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "local config path must be a regular file",
+        ));
+
+    assert!(outside_team.is_symlink());
+    assert_eq!(std::fs::read(&manifest_path).unwrap(), manifest_before);
+}
+
+#[cfg(unix)]
+#[test]
+fn uninstall_rejects_forged_external_vault_team_exception_without_local_authorization() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .success();
+
+    let external_vault = temp.path().join("outside-vault");
+    std::fs::create_dir_all(&external_vault).unwrap();
+    let manifest = add_hostile_manifest_symlink(&root, &external_vault.join("Team"));
+    let manifest_path = root.join(".config/agent-home/manifest.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&manifest).unwrap();
+    value["vault"] = serde_json::Value::String(external_vault.to_string_lossy().into_owned());
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    let manifest = std::fs::read(&manifest_path).unwrap();
+    let external_team = external_vault.join("Team");
+    assert!(external_team.is_symlink());
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not authorized by local config"));
+
+    assert!(external_team.is_symlink());
+    assert_eq!(std::fs::read(&manifest_path).unwrap(), manifest);
+}
+
+#[cfg(unix)]
+#[test]
+fn uninstall_rejects_manifest_vault_different_from_local_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    let configured = temp.path().join("configured-vault");
+    let forged = temp.path().join("forged-vault");
+    std::fs::create_dir_all(&configured).unwrap();
+    std::fs::create_dir_all(&forged).unwrap();
+    let config_path = root.join(".config/agent-home/config.toml");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config_path,
+        format!("schema = 1\nvault = \"{}\"\n", configured.display()),
+    )
+    .unwrap();
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .success();
+
+    let manifest_path = root.join(".config/agent-home/manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    let shared_home = manifest["shared_home"].as_str().unwrap().to_owned();
+    let target = forged.join("Team");
+    std::os::unix::fs::symlink(&shared_home, &target).unwrap();
+    manifest["vault"] = serde_json::Value::String(forged.to_string_lossy().into_owned());
+    manifest["entries"][target.to_string_lossy().as_ref()] = serde_json::json!({
+        "kind": "symlink", "target": target, "source": shared_home, "backup": null,
+        "original_sha256": null, "installed_sha256": null
+    });
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let before = std::fs::read(&manifest_path).unwrap();
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("does not match local config"));
+
+    assert!(target.is_symlink());
+    assert_eq!(std::fs::read(&manifest_path).unwrap(), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn install_rejects_external_manifest_symlink_before_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .success();
+    let external = temp.path().join("outside/managed-link");
+    let manifest = add_hostile_manifest_symlink(&root, &external);
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("target escapes"));
+
+    assert!(external.is_symlink());
+    assert!(root.join("Team").is_symlink());
+    assert_eq!(
+        std::fs::read(root.join(".config/agent-home/manifest.json")).unwrap(),
+        manifest
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn install_rejects_traversal_manifest_target_before_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .success();
+    let external = temp.path().join("outside/managed-link");
+    let manifest_path = root.join(".config/agent-home/manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    let shared = manifest["shared_home"].as_str().unwrap().to_owned();
+    std::fs::create_dir_all(external.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&shared, &external).unwrap();
+    let traversal = root.join("../outside/managed-link");
+    manifest["entries"][traversal.to_string_lossy().as_ref()] = serde_json::json!({
+        "kind": "symlink", "target": traversal, "source": shared, "backup": null,
+        "original_sha256": null, "installed_sha256": null
+    });
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let bytes = std::fs::read(&manifest_path).unwrap();
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("target escapes"));
+
+    assert!(external.is_symlink());
+    assert!(root.join("Team").is_symlink());
+    assert_eq!(std::fs::read(&manifest_path).unwrap(), bytes);
+}
+
+#[cfg(unix)]
+#[test]
+fn prune_rejects_external_manifest_symlink_before_removal() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .success();
+    let external = temp.path().join("outside/managed-link");
+    let manifest = add_hostile_manifest_symlink(&root, &external);
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("target escapes"));
+
+    assert!(external.is_symlink());
+    assert!(root.join("Team").is_symlink());
+    assert_eq!(
+        std::fs::read(root.join(".config/agent-home/manifest.json")).unwrap(),
+        manifest
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn uninstall_rejects_external_manifest_symlink_before_removal() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .success();
+    let external = temp.path().join("outside/managed-link");
+    let manifest = add_hostile_manifest_symlink(&root, &external);
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("target escapes"));
+
+    assert!(external.is_symlink());
+    assert!(root.join("Team").is_symlink());
+    assert_eq!(
+        std::fs::read(root.join(".config/agent-home/manifest.json")).unwrap(),
+        manifest
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn uninstall_rejects_traversal_manifest_target_before_removal() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .success();
+    let external = temp.path().join("outside/managed-link");
+    let manifest_path = root.join(".config/agent-home/manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    let shared = manifest["shared_home"].as_str().unwrap().to_owned();
+    std::fs::create_dir_all(external.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&shared, &external).unwrap();
+    let traversal = root.join("../outside/managed-link");
+    manifest["entries"][traversal.to_string_lossy().as_ref()] = serde_json::json!({
+        "kind": "symlink", "target": traversal, "source": shared, "backup": null,
+        "original_sha256": null, "installed_sha256": null
+    });
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let bytes = std::fs::read(&manifest_path).unwrap();
+
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("target escapes"));
+
+    assert!(external.is_symlink());
+    assert!(root.join("Team").is_symlink());
+    assert_eq!(std::fs::read(&manifest_path).unwrap(), bytes);
+}
+
+#[test]
 fn install_links_shared_skills_for_agents_and_uninstall_removes_only_those_links() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("home");
@@ -559,7 +1390,7 @@ fn stub_path(tools: &[&str], node_version: Option<&str>) -> tempfile::TempDir {
         write(tool, "exit 0");
     }
     if let Some(version) = node_version {
-        write("node", &format!("echo {version}"));
+        write("node", &format!("echo {version} >&2"));
     }
     // A non-executable file must not count as an installed tool.
     std::fs::write(dir.path().join("az"), "not executable").unwrap();
@@ -1118,6 +1949,69 @@ fn install_manifest_write_failure_rolls_back_managed_actions_and_backups() {
 }
 
 #[test]
+fn install_refuses_a_symlinked_local_config_before_mutating_managed_paths() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("home");
+        let config_dir = root.join(".config/agent-home");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let outside = temp.path().join("outside-config.toml");
+        std::fs::write(&outside, b"schema = 1\nprofile = \"core\"\n").unwrap();
+        let local = config_dir.join("config.toml");
+        symlink(&outside, &local).unwrap();
+
+        Command::cargo_bin("vesica")
+            .unwrap()
+            .args(["install", "--home-repo"])
+            .arg(fixture_home())
+            .args(["--root"])
+            .arg(&root)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "local config path must be a regular file",
+            ));
+
+        assert!(local.is_symlink());
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"schema = 1\nprofile = \"core\"\n"
+        );
+        assert!(!root.join("Team").exists());
+        assert!(!root.join(".config/agent-home/manifest.json").exists());
+    }
+}
+
+#[test]
+fn failed_install_manifest_commit_restores_existing_local_configuration() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    let config = root.join(".config/agent-home");
+    std::fs::create_dir_all(config.join("manifest.json.tmp")).unwrap();
+    let local_path = config.join("config.toml");
+    let original = b"schema = 1\nprofile = \"core\"\n# machine-local comment\n";
+    std::fs::write(&local_path, original).unwrap();
+
+    let result = Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--profile", "lead", "--root"])
+        .arg(&root)
+        .output()
+        .unwrap();
+
+    assert!(!result.status.success());
+    assert_eq!(std::fs::read(&local_path).unwrap(), original);
+    assert!(!config.join("manifest.json").exists());
+    assert!(config.join("manifest.json.tmp").is_dir());
+    assert!(!root.join("Team").exists());
+}
+
+#[test]
 fn install_manifest_persistence_failure_rolls_back_actions_and_new_backups() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("home");
@@ -1170,6 +2064,112 @@ fn install_manifest_persistence_failure_rolls_back_actions_and_new_backups() {
 }
 
 #[test]
+fn uninstall_with_retained_entries_commits_progress_before_removing_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .success();
+
+    let claude = root.join(".claude/CLAUDE.md");
+    std::fs::write(&claude, "user replacement\n").unwrap();
+    let manifest_path = root.join(".config/agent-home/manifest.json");
+    let obstruction = root.join(".config/agent-home/manifest.json.tmp");
+    std::fs::create_dir(&obstruction).unwrap();
+    let managed_link = root.join("Team");
+
+    let result = Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .output()
+        .unwrap();
+
+    assert!(!result.status.success());
+    let diagnostic = String::from_utf8_lossy(&result.stdout).to_string()
+        + &String::from_utf8_lossy(&result.stderr);
+    assert!(diagnostic.contains("manifest temp file"), "{diagnostic}");
+    assert_eq!(std::fs::read(&claude).unwrap(), b"user replacement\n");
+    assert!(
+        managed_link.is_symlink(),
+        "save failure must occur before unlink"
+    );
+    assert!(manifest_path.is_file());
+    assert!(obstruction.is_dir());
+}
+
+#[test]
+fn uninstall_keeps_symlink_replacements_and_referents_untouched() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("home");
+        Command::cargo_bin("vesica")
+            .unwrap()
+            .args(["install", "--home-repo"])
+            .arg(fixture_home())
+            .args(["--root"])
+            .arg(&root)
+            .assert()
+            .success();
+        let target = root.join(".claude/CLAUDE.md");
+        let outside = temp.path().join("outside.txt");
+        std::fs::write(&outside, std::fs::read(&target).unwrap()).unwrap();
+        std::fs::remove_file(&target).unwrap();
+        symlink(&outside, &target).unwrap();
+
+        Command::cargo_bin("vesica")
+            .unwrap()
+            .args(["uninstall", "--root"])
+            .arg(&root)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Skipped replaced managed target"));
+
+        assert!(target.is_symlink());
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            std::fs::read(&target).unwrap()
+        );
+        assert!(root.join(".config/agent-home/manifest.json").is_file());
+    }
+}
+
+#[test]
+fn uninstall_treats_missing_managed_targets_as_already_removed() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("home");
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["install", "--home-repo"])
+        .arg(fixture_home())
+        .args(["--root"])
+        .arg(&root)
+        .assert()
+        .success();
+
+    std::fs::remove_file(root.join(".config/opencode/opencode.json")).unwrap();
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["uninstall", "--root"])
+        .arg(&root)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Skipped missing managed target"));
+
+    assert!(!root.join("Team").exists());
+    assert!(!root.join(".agents/skills/demo-skill").exists());
+    assert!(!root.join(".config/agent-home/manifest.json").exists());
+}
+
+#[test]
 fn install_writes_a_manifest_and_uninstalls_only_untouched_managed_files() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("home");
@@ -1188,7 +2188,7 @@ fn install_writes_a_manifest_and_uninstalls_only_untouched_managed_files() {
         .arg(&root)
         .assert()
         .success()
-        .stdout(predicate::str::contains("Recorded entries: 10"));
+        .stdout(predicate::str::contains("Recorded entries: 12"));
 
     Command::cargo_bin("vesica")
         .unwrap()
@@ -1208,6 +2208,47 @@ fn install_writes_a_manifest_and_uninstalls_only_untouched_managed_files() {
         .stdout(predicate::str::contains("Removed manifest"));
     assert!(!root.join("Team").exists());
     assert!(!root.join(".claude/CLAUDE.md").exists());
+}
+
+#[test]
+fn install_backups_are_private_under_permissive_umask() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("home");
+        let target = root.join(".claude/CLAUDE.md");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "synthetic private config\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        Command::cargo_bin("vesica")
+            .unwrap()
+            .args(["install", "--home-repo"])
+            .arg(fixture_home())
+            .args(["--root"])
+            .arg(&root)
+            .env("TMPDIR", "/mnt/wsl-home")
+            .assert()
+            .success();
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join(".config/agent-home/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        let backup = std::path::PathBuf::from(
+            manifest["entries"][target.to_string_lossy().as_ref()]["backup"]
+                .as_str()
+                .unwrap(),
+        );
+        assert_eq!(
+            std::fs::metadata(backup).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 }
 
 #[test]

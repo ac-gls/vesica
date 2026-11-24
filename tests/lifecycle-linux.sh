@@ -27,7 +27,9 @@ if [[ -n "${VESICA_TEST_TMP_ROOT:-}" ]]; then export TMPDIR="$VESICA_TEST_TMP_RO
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/vesica-lifecycle.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/home"
-export VESICA_VERSION=v0.0.0-test  # test-only asset name; independent of the release default
+# Real artifact identity must match the checksum-valid bootstrap fixture tag.
+VESICA_VERSION="v$("$BIN" --version | cut -d' ' -f2)"
+export VESICA_VERSION
 mkdir -p "$HOME"
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$TMP/gitconfig"
 git config --global user.name "Vesica Lifecycle"
@@ -319,11 +321,11 @@ tags: [architecture]
 ---
 See [[Team/Standards/coding-standards]] for the rules.
 NOTE
-check S9 "share without confirmation writes nothing" sh -c '"$1" share "$2/Inbox/proposal.md" --home-repo "$3" --root "$2" --area Architecture >"$4" && grep -q "Nothing was written" "$4" && test ! -e "$3/Knowledge/Architecture/proposal.md" && test -z "$(git -C "$3" branch --list share/proposal)" && test "$(git -C "$3" rev-parse --abbrev-ref HEAD)" = main' _ "$BIN" "$SV" "$SH" "$TMP/s9/plan.out"
-check S9 "share promotes on a branch with owner and authority" sh -c '"$1" share "$2/Inbox/proposal.md" --home-repo "$3" --root "$2" --area Architecture --yes >"$4" && test "$(git -C "$3" rev-parse --abbrev-ref HEAD)" = share/proposal && grep -q "owner: " "$3/Knowledge/Architecture/proposal.md" && grep -q "authority: working" "$3/Knowledge/Architecture/proposal.md"' _ "$BIN" "$SV" "$SH" "$TMP/s9/apply.out"
+check S9 "share without confirmation writes nothing" sh -c '"$1" share "$2/Inbox/proposal.md" --home-repo "$3" --root "$2" --vault "$2" --area Architecture >"$4" && grep -q "Nothing was written" "$4" && test ! -e "$3/Knowledge/Architecture/proposal.md" && test -z "$(git -C "$3" branch --list share/proposal)" && test "$(git -C "$3" rev-parse --abbrev-ref HEAD)" = main' _ "$BIN" "$SV" "$SH" "$TMP/s9/plan.out"
+check S9 "share promotes on a branch with owner and authority" sh -c '"$1" share "$2/Inbox/proposal.md" --home-repo "$3" --root "$2" --vault "$2" --area Architecture --yes >"$4" && test "$(git -C "$3" rev-parse --abbrev-ref HEAD)" = share/proposal && grep -q "owner: " "$3/Knowledge/Architecture/proposal.md" && grep -q "authority: working" "$3/Knowledge/Architecture/proposal.md"' _ "$BIN" "$SV" "$SH" "$TMP/s9/apply.out"
 check S9 "share rewrote the vault-view link for the shared home" grep -q '\[\[Standards/coding-standards\]\]' "$SH/Knowledge/Architecture/proposal.md"
 check S9 "share left trunk untouched" sh -c '! git -C "$1" log main --format=%s | grep -q "^share/" && test "$(git -C "$1" rev-list --count main)" = 1' _ "$SH"
-refuse S9 "share refuses an existing destination" "already exists" "$BIN" share "$SV/Inbox/proposal.md" --home-repo "$SH" --root "$SV" --area Architecture --yes
+refuse S9 "share refuses an existing destination" "already exists" "$BIN" share "$SV/Inbox/proposal.md" --home-repo "$SH" --root "$SV" --vault "$SV" --area Architecture --yes
 check S9 "the refusal left the branch and the note as they were" sh -c 'test "$(git -C "$1" status --porcelain)" = "" && test "$(git -C "$1" rev-parse --abbrev-ref HEAD)" = share/proposal' _ "$SH"
 
 if command -v git-lfs >/dev/null 2>&1; then LFS="git-lfs present ($(git lfs version | cut -d' ' -f1)); LFS behavior not in the fixture contract yet — not tested"

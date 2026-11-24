@@ -1,4 +1,5 @@
 mod preflight;
+mod recovery;
 mod release;
 mod repos;
 
@@ -25,6 +26,9 @@ enum Command {
     Vault(VaultOptions),
     /// Download a release, verify it and replace this binary, then re-link
     Update(UpdateOptions),
+    /// Internal migration entry point, invoked only by a verified update executable.
+    #[command(name = "__update-relink", hide = true)]
+    UpdateRelink(UpdateRelinkOptions),
     /// Scaffold a skill on a branch in the shared home
     NewSkill(NewSkillOptions),
     /// Plan copying Standards/* into opted-in code repositories
@@ -51,12 +55,7 @@ impl ProfileArg {
 }
 #[derive(Debug, clap::Args)]
 struct Options {
-    #[arg(
-        long,
-        env = "AGENT_HOME_REPO",
-        env = "VESICA_HOME_REPO",
-        help = "Local team shared-home checkout (or set home_repo in the local config)"
-    )]
+    #[arg(long, env = "AGENT_HOME_REPO", env = "VESICA_HOME_REPO")]
     home_repo: Option<PathBuf>,
     #[arg(long, value_enum, help = "Select a team profile")]
     profile: Option<ProfileArg>,
@@ -136,10 +135,12 @@ enum ConfigCommand {
 }
 #[derive(Debug, clap::Args)]
 struct InstallOptions {
-    #[command(flatten)]
-    options: Options,
+    #[arg(long, env = "AGENT_HOME_REPO", env = "VESICA_HOME_REPO")]
+    home_repo: Option<PathBuf>,
     #[arg(long, env = "AGENT_HOME_ROOT", env = "VESICA_ROOT")]
     root: Option<PathBuf>,
+    #[arg(long, value_enum, help = "Select a team profile")]
+    profile: Option<ProfileArg>,
     #[arg(long)]
     dry_run: bool,
     #[arg(
@@ -194,12 +195,14 @@ enum TeamCommand {
 }
 #[derive(Debug, clap::Args)]
 struct ShareOptions {
-    /// Personal note to promote (must be inside the vault)
+    /// Personal note to promote (must be inside the configured personal vault)
     note: PathBuf,
     #[command(flatten)]
     options: Options,
     #[arg(long, env = "AGENT_HOME_ROOT", env = "VESICA_ROOT")]
     root: Option<PathBuf>,
+    #[arg(long, env = "VESICA_VAULT", help = "Explicit personal-vault path")]
+    vault: Option<PathBuf>,
     #[arg(long, help = "Destination area under Knowledge/ in the shared home")]
     area: Option<String>,
     #[arg(long, help = "Promote into Decisions/ instead of Knowledge/<area>")]
@@ -286,6 +289,21 @@ struct UpdateOptions {
     repos_dir: Option<PathBuf>,
     #[arg(long)]
     dry_run: bool,
+}
+#[derive(Debug, clap::Args)]
+struct UpdateRelinkOptions {
+    #[arg(long, hide = true)]
+    recovery_path: Option<PathBuf>,
+    #[arg(long)]
+    shared_home: PathBuf,
+    #[arg(long, value_enum)]
+    profile: ProfileArg,
+    #[arg(long)]
+    root: Option<PathBuf>,
+    #[arg(long)]
+    repos_dir: Option<PathBuf>,
+    #[arg(long)]
+    vault: Option<PathBuf>,
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ChannelArg {
@@ -375,6 +393,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::VaultScan(o) => vault_scan(&o.path),
         Command::Vault(o) => vault(o.command),
         Command::Update(o) => update(o),
+        Command::UpdateRelink(o) => update_relink(o),
         Command::NewSkill(o) => new_skill(o),
         Command::SyncStandards(o) => sync_standards(o),
         Command::Share(o) => share(o),
@@ -456,43 +475,277 @@ fn lint(path: &Path) -> Result<()> {
     anyhow::bail!("{} lint finding(s)", findings.len())
 }
 
+/// Normalize an absolute path without consulting the filesystem, so missing managed targets can
+/// still be validated and `..` cannot escape a permitted root.
+fn normalized_absolute(path: &Path) -> Result<PathBuf> {
+    if !path.is_absolute() {
+        anyhow::bail!("path is not absolute: {}", path.display());
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    anyhow::bail!("path escapes its root: {}", path.display());
+                }
+            }
+            std::path::Component::Normal(part) => normalized.push(part),
+        }
+    }
+    Ok(normalized)
+}
+
+fn reject_symlink_components(path: &Path) -> Result<()> {
+    let path = normalized_absolute(path)?;
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                anyhow::bail!(
+                    "vault path contains a symlink component: {}",
+                    current.display()
+                );
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+/// Resolve parent directories but not the final node, which may itself be a managed symlink.
+fn canonical_path_with_missing(path: &Path) -> Result<PathBuf> {
+    let path = normalized_absolute(path)?;
+    let mut ancestor = path.clone();
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::canonicalize(&ancestor) {
+            Ok(mut canonical) => {
+                for component in missing.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = ancestor.file_name().with_context(|| {
+                    format!("cannot resolve existing ancestor of {}", path.display())
+                })?;
+                missing.push(name.to_os_string());
+                ancestor.pop();
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("canonicalizing existing ancestor of {}", path.display())
+                });
+            }
+        }
+    }
+}
+
+/// Resolve parent directories but not the final node, which may itself be a managed symlink.
+fn canonicalized_destination(path: &Path) -> Result<PathBuf> {
+    let path = normalized_absolute(path)?;
+    let name = path
+        .file_name()
+        .with_context(|| format!("manifest path has no filename: {}", path.display()))?;
+    let mut canonical = canonical_path_with_missing(path.parent().unwrap_or(Path::new("/")))?;
+    canonical.push(name);
+    Ok(canonical)
+}
+
+/// Validate every manifest path before install/prune/uninstall makes filesystem changes.
+fn validate_manifest_scope(
+    manifest: &ah_core::Manifest,
+    machine_root: &Path,
+    config_dir: &Path,
+) -> Result<()> {
+    let machine_root = normalized_absolute(machine_root)?;
+    let canonical_machine_root = canonical_path_with_missing(&machine_root)?;
+    let config_dir = normalized_absolute(config_dir)?;
+    let canonical_config_dir = canonical_path_with_missing(&config_dir)?;
+    if !canonical_config_dir.starts_with(&canonical_machine_root) {
+        anyhow::bail!("managed config directory resolves outside the selected root");
+    }
+    let shared_home = if manifest.shared_home.is_empty() {
+        None
+    } else {
+        Some(normalized_absolute(Path::new(&manifest.shared_home))?)
+    };
+    let vault = manifest
+        .vault
+        .as_deref()
+        .map(|path| canonical_path_with_missing(Path::new(path)))
+        .transpose()?;
+    let local_config_path = ah_core::LocalConfig::path_in(&config_dir);
+    match std::fs::symlink_metadata(&local_config_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            anyhow::bail!(
+                "Vesica local config path must be a regular file: {}",
+                local_config_path.display()
+            );
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let configured_vault = ah_core::LocalConfig::load(&config_dir)?
+        .vault
+        .as_deref()
+        .map(canonical_path_with_missing)
+        .transpose()?;
+    if let Some(vault) = &vault {
+        if let Some(configured) = &configured_vault {
+            if vault != configured {
+                anyhow::bail!("manifest vault does not match local config");
+            }
+        }
+        if !vault.starts_with(&canonical_machine_root) && configured_vault.as_ref() != Some(vault) {
+            // A manifest is editable and cannot authorize deletion outside the selected root.
+            anyhow::bail!("manifest vault is not authorized by local config");
+        }
+    }
+
+    for (key, entry) in &manifest.entries {
+        let target = normalized_absolute(Path::new(&entry.target))
+            .with_context(|| format!("manifest entry {key} target must be absolute"))?;
+        let canonical_target = canonicalized_destination(&target)
+            .with_context(|| format!("resolving manifest entry {key} target"))?;
+        let in_managed_scope = (target.starts_with(&machine_root)
+            && canonical_target.starts_with(&canonical_machine_root))
+            || (target.starts_with(&config_dir)
+                && canonical_target.starts_with(&canonical_config_dir));
+        let approved_vault_team = entry.kind == "symlink"
+            && vault.as_ref().is_some_and(|vault| {
+                target == vault.join("Team")
+                    && canonicalized_destination(&target)
+                        .ok()
+                        .and_then(|resolved| resolved.parent().map(Path::to_path_buf))
+                        .as_ref()
+                        == Some(vault)
+            })
+            && shared_home.as_ref().is_some_and(|shared| {
+                entry
+                    .source
+                    .as_deref()
+                    .and_then(|source| normalized_absolute(Path::new(source)).ok())
+                    .is_some_and(|source| source.starts_with(shared))
+            });
+        if !in_managed_scope && !approved_vault_team {
+            anyhow::bail!("manifest entry {key} target escapes the managed install scope");
+        }
+        if let Some(backup) = entry.backup.as_deref() {
+            let backup = normalized_absolute(Path::new(backup))
+                .with_context(|| format!("manifest entry {key} backup must be absolute"))?;
+            let canonical_backup = canonicalized_destination(&backup)
+                .with_context(|| format!("resolving manifest entry {key} backup"))?;
+            if !(backup.starts_with(&machine_root)
+                && canonical_backup.starts_with(&canonical_machine_root))
+                && !(backup.starts_with(&config_dir)
+                    && canonical_backup.starts_with(&canonical_config_dir))
+            {
+                anyhow::bail!("manifest entry {key} backup escapes the managed install scope");
+            }
+        }
+        if let Some(source) = entry.source.as_deref() {
+            normalized_absolute(Path::new(source))
+                .with_context(|| format!("manifest entry {key} source must be absolute"))?;
+        }
+    }
+    Ok(())
+}
+
 /// Remove symlinks recorded by an earlier install that this install no longer plans (for example
 /// `~/Team` after switching to `--vault`). A link is removed only if it still points exactly where
 /// Vesica put it; a link the user changed is left in place and released from the manifest.
-fn prune_stale_links(cfg: &Path, plan: &ah_core::Plan, dry: bool) -> Result<()> {
+fn prune_stale_impl<F>(
+    cfg: &Path,
+    plan: &ah_core::Plan,
+    machine_root: &Path,
+    dry: bool,
+    mut journal: Option<&mut recovery::Journal>,
+    mut before_remove: F,
+) -> Result<()>
+where
+    F: FnMut(usize, &Path) -> Result<()>,
+{
     let manifest_path = cfg.join("manifest.json");
     let mut manifest = ah_core::Manifest::load(&manifest_path)?;
+    validate_manifest_scope(&manifest, machine_root, cfg)?;
+    let mut removal_count = 0;
     let planned: std::collections::BTreeSet<&str> =
         plan.actions.iter().map(ah_core::Action::key).collect();
     let stale: Vec<String> = manifest
         .entries
         .iter()
-        .filter(|(key, entry)| entry.kind == "symlink" && !planned.contains(key.as_str()))
+        .filter(|(key, entry)| {
+            matches!(entry.kind.as_str(), "symlink" | "generated-file")
+                && !planned.contains(key.as_str())
+        })
         .map(|(key, _)| key.clone())
         .collect();
     let mut changed = false;
     for key in stale {
         let entry = &manifest.entries[&key];
         let target = Path::new(&entry.target);
-        let current = std::fs::read_link(target).ok().map(|link| {
-            if link.is_absolute() {
-                link
-            } else {
-                target.parent().unwrap_or(Path::new(".")).join(link)
+        if entry.kind == "generated-file" {
+            match std::fs::symlink_metadata(target) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    println!("Forgot missing stale generated file: {key}");
+                }
+                Err(error) => return Err(error.into()),
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                    println!("Kept replaced stale generated file: {key}");
+                    continue;
+                }
+                Ok(_) => {
+                    let current = std::fs::read(target)?;
+                    let expected = entry.installed_sha256.as_deref();
+                    let matches = expected.is_some_and(|expected| {
+                        use sha2::Digest;
+                        hex::encode(sha2::Sha256::digest(&current)) == expected
+                    });
+                    if !matches {
+                        println!("Kept modified stale generated file: {key}");
+                        continue;
+                    }
+                    if dry {
+                        println!("Would remove stale generated file: {key}");
+                        continue;
+                    }
+                    removal_count += 1;
+                    before_remove(removal_count, target)?;
+                    remove_pruned_node(target, journal.as_deref_mut())?;
+                    println!("Removed stale generated file: {key}");
+                }
             }
-        });
-        let expected = entry.source.as_deref().map(PathBuf::from);
-        if current.is_some() && current == expected {
-            if dry {
-                println!("Would remove stale link: {key}");
-                continue;
-            }
-            std::fs::remove_file(target)?;
-            println!("Removed stale link: {key}");
-        } else if std::fs::symlink_metadata(target).is_err() {
-            println!("Forgot missing stale link: {key}");
         } else {
-            println!("Kept modified stale link: {key} (no longer managed by Vesica)");
+            let current = std::fs::read_link(target).ok().map(|link| {
+                if link.is_absolute() {
+                    link
+                } else {
+                    target.parent().unwrap_or(Path::new(".")).join(link)
+                }
+            });
+            let expected = entry.source.as_deref().map(PathBuf::from);
+            if current.is_some() && current == expected {
+                if dry {
+                    println!("Would remove stale link: {key}");
+                    continue;
+                }
+                removal_count += 1;
+                before_remove(removal_count, target)?;
+                remove_pruned_node(target, journal.as_deref_mut())?;
+                println!("Removed stale link: {key}");
+            } else if std::fs::symlink_metadata(target).is_err() {
+                println!("Forgot missing stale link: {key}");
+            } else {
+                println!("Kept modified stale link: {key} (no longer managed by Vesica)");
+            }
         }
         if !dry {
             manifest.entries.remove(&key);
@@ -501,6 +754,23 @@ fn prune_stale_links(cfg: &Path, plan: &ah_core::Plan, dry: bool) -> Result<()> 
     }
     if changed {
         manifest.save_atomic(&manifest_path)?;
+    }
+    Ok(())
+}
+
+fn remove_pruned_node(target: &Path, journal: Option<&mut recovery::Journal>) -> Result<()> {
+    let before = recovery::Node::read(target)?;
+    std::fs::remove_file(target)?;
+    if let Some(journal) = journal {
+        if let Err(error) = journal.record_postimage(target, recovery::Node::Absent) {
+            // The deletion is ours even when saving its checkpoint fails. Undo it
+            // in the child using the known postimage before the parent loads old evidence.
+            if let Err(rollback) = before.restore(target, &recovery::Node::Absent) {
+                let saved = journal.save().err();
+                anyhow::bail!("prune checkpoint failed: {error:#}; prune rollback failed: {rollback:#}; recovery checkpoint retry: {saved:?}");
+            }
+            anyhow::bail!("prune checkpoint failed: {error:#}; pruned node restored");
+        }
     }
     Ok(())
 }
@@ -528,6 +798,19 @@ fn print_vault_changes(changes: &[ah_vault::personal::VaultChange], dry: bool) -
 /// then re-link from the recorded manifest. The staged download lives beside the target so the
 /// final `rename` is atomic, and it is removed whatever happens.
 fn update(o: UpdateOptions) -> Result<()> {
+    let state_dir = machine_root(o.root.as_deref())?.join(".config/agent-home");
+    if let Ok(entries) = std::fs::read_dir(&state_dir) {
+        for entry in entries {
+            let entry = entry?;
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".vesica-relink-")
+            {
+                anyhow::bail!("pending recovery at {}; preserve this journal, resolve reported user edits or restore its recorded postimage before retrying update; no migration was started", entry.path().display());
+            }
+        }
+    }
     let tag = match &o.tag {
         Some(tag) => {
             release::validate_tag(tag)?;
@@ -546,29 +829,44 @@ fn update(o: UpdateOptions) -> Result<()> {
         }
     };
     let current = env!("CARGO_PKG_VERSION");
-    if tag.trim_start_matches('v') == current {
-        println!("Already up to date: vesica {current} ({tag})");
-        return Ok(());
-    }
     let target = match &o.target {
         Some(target) => target.clone(),
         None => std::env::current_exe().context("cannot determine the running executable")?,
     };
-    let parent = target
-        .parent()
-        .context("target has no parent directory")?
-        .to_path_buf();
+    let target = std::path::absolute(&target)?;
+    let parent = target.parent().context("target has no parent directory")?;
+    reject_symlink_components(parent)?;
+    let previous = recovery::Node::read(&target)?;
+    if !matches!(
+        previous,
+        recovery::Node::Absent | recovery::Node::File { .. }
+    ) {
+        anyhow::bail!("update target must be a regular file: {}", target.display());
+    }
+    let reports_current = release::reports_version(&target, current);
+    if tag.trim_start_matches('v') == current && reports_current {
+        println!("Already up to date: vesica {current} ({tag})");
+        if o.dry_run {
+            println!("Dry run: pending re-link would use the recorded manifest; nothing changed");
+        } else {
+            relink_from_manifest(&o, &target)?;
+        }
+        return Ok(());
+    }
+    if tag.trim_start_matches('v') == current && !reports_current {
+        println!("Installing {tag}: target does not report vesica {current}");
+    }
+    std::fs::create_dir_all(parent)?;
+    let staging = tempfile::Builder::new()
+        .prefix(".vesica-update-")
+        .tempdir_in(parent)?;
     let base_url = std::env::var("VESICA_RELEASE_BASE_URL")
         .unwrap_or_else(|_| release::DEFAULT_BASE_URL.to_owned());
-    let staging = parent.join(format!(
-        ".vesica-update-{}",
-        utc_stamp(std::time::SystemTime::now())
-    ));
-    std::fs::create_dir_all(&staging).with_context(|| format!("creating {}", staging.display()))?;
+    let mut installed = None;
     let outcome = (|| -> Result<()> {
-        let tarball = release::download(&staging, &base_url, &tag)?;
-        release::verify_checksum(&staging, &tarball)?;
-        let binary = release::extract(&staging, &tarball, &tag)?;
+        let tarball = release::download(staging.path(), &base_url, &tag)?;
+        release::verify_checksum(staging.path(), &tarball)?;
+        let binary = release::extract(staging.path(), &tarball, &tag)?;
         release::check_reports_version(&binary, &tag)?;
         if o.dry_run {
             println!(
@@ -578,59 +876,261 @@ fn update(o: UpdateOptions) -> Result<()> {
             );
             return Ok(());
         }
-        release::replace(&target, &binary)?;
+        if !previous.matches(&target)? {
+            anyhow::bail!("update target changed during verification; preserving user changes");
+        }
+        replace_update_binary(&target, &binary, &mut installed, recovery::Node::read)?;
         println!(
             "Replaced {} (vesica {})",
             target.display(),
             tag.trim_start_matches('v')
         );
+        relink_impl(&o, &target, |_| {
+            std::fs::remove_dir_all(staging.path()).context("update staging cleanup failed")
+        })?;
         Ok(())
     })();
-    // Always remove the staging directory, on success and on every failure path.
-    let cleanup = std::fs::remove_dir_all(&staging);
-    outcome?;
-    cleanup.with_context(|| format!("removing {}", staging.display()))?;
-    if o.dry_run {
-        return Ok(());
+    let mut errors = Vec::new();
+    if outcome.is_err() {
+        if let Some(expected) = installed.as_ref() {
+            if let Err(error) = previous.restore(&target, expected) {
+                errors.push(format!("binary rollback failed: {error:#}"));
+            }
+        }
     }
-    relink_from_manifest(&o)
+    if staging.path().exists() {
+        if let Err(error) = staging.close() {
+            errors.push(format!("staging cleanup failed: {error}"));
+        }
+    }
+    match (outcome, errors.is_empty()) {
+        (Err(error), true) => Err(error),
+        (Err(error), false) => anyhow::bail!("{error:#}; {}", errors.join("; ")),
+        (Ok(()), false) => anyhow::bail!("{}", errors.join("; ")),
+        (Ok(()), true) => Ok(()),
+    }
 }
 
-/// Re-run the install plan from what the manifest recorded, so links follow the new binary.
-fn relink_from_manifest(o: &UpdateOptions) -> Result<()> {
-    let cfg = root(o.root.as_deref())?.join(".config/agent-home");
-    let manifest_path = cfg.join("manifest.json");
-    if !manifest_path.is_file() {
-        println!(
-            "No manifest recorded at {}; skipping re-link",
-            manifest_path.display()
-        );
-        return Ok(());
-    }
-    let manifest = ah_core::Manifest::load(&manifest_path)?;
+fn replace_update_binary<F>(
+    target: &Path,
+    binary: &Path,
+    installed: &mut Option<recovery::Node>,
+    read_postimage: F,
+) -> Result<()>
+where
+    F: FnOnce(&Path) -> Result<recovery::Node>,
+{
+    // The staged candidate bytes are trusted before rename; replace fixes its mode
+    // to 0755. Establish ownership as soon as rename succeeds, before fallible I/O.
+    let recovery::Node::File { bytes, .. } = recovery::Node::read(binary)? else {
+        anyhow::bail!("verified candidate must be a regular file");
+    };
+    let expected = recovery::Node::File {
+        bytes,
+        permissions: {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::Permissions::from_mode(0o100755)
+        },
+    };
+    release::replace(target, binary)?;
+    *installed = Some(expected);
+    read_postimage(target)?;
+    Ok(())
+}
+
+fn run_manifest_relink_from_path(
+    executable: &Path,
+    manifest_path: &Path,
+    repos_dir: Option<&Path>,
+    root_dir: Option<&Path>,
+    recovery_path: &Path,
+) -> Result<()> {
+    let manifest = ah_core::Manifest::load(manifest_path)?;
     if manifest.shared_home.is_empty() {
         println!("Manifest records no shared home; skipping re-link");
         return Ok(());
     }
     let profile = match manifest.profile.as_str() {
-        "core" => Some(ProfileArg::Core),
-        "lead" => Some(ProfileArg::Lead),
-        _ => Some(ProfileArg::Developer),
+        "core" => "core",
+        "lead" => "lead",
+        _ => "developer",
     };
+    let mut command = std::process::Command::new(executable);
+    command
+        .arg("__update-relink")
+        .arg("--recovery-path")
+        .arg(recovery_path)
+        .arg("--shared-home")
+        .arg(&manifest.shared_home)
+        .arg("--profile")
+        .arg(profile);
+    if let Some(root) = root_dir {
+        command.arg("--root").arg(root);
+    }
+    if let Some(repos) = repos_dir {
+        command.arg("--repos-dir").arg(repos);
+    }
+    if let Some(vault) = &manifest.vault {
+        command.arg("--vault").arg(vault);
+    }
+    let status = command
+        .status()
+        .context("running verified replacement for re-link")?;
+    if !status.success() {
+        anyhow::bail!("verified replacement re-link failed with {status}");
+    }
+    Ok(())
+}
+
+fn update_relink(o: UpdateRelinkOptions) -> Result<()> {
     println!(
         "Re-linking from the recorded manifest ({})",
-        manifest.shared_home
+        o.shared_home.display()
     );
-    install(InstallOptions {
-        options: Options {
-            home_repo: Some(PathBuf::from(&manifest.shared_home)),
-            profile,
+    install_with_recovery(
+        InstallOptions {
+            home_repo: Some(o.shared_home),
+            profile: Some(o.profile),
+            root: o.root,
+            dry_run: false,
+            repos_dir: o.repos_dir,
+            vault: o.vault,
         },
-        root: o.root.clone(),
-        dry_run: false,
-        repos_dir: o.repos_dir.clone(),
-        vault: manifest.vault.as_ref().map(PathBuf::from),
+        o.recovery_path.as_deref(),
+    )
+}
+
+fn relink_from_manifest(o: &UpdateOptions, executable: &Path) -> Result<()> {
+    relink_impl(o, executable, |_| Ok(()))
+}
+
+fn relink_impl<F>(o: &UpdateOptions, executable: &Path, before_cleanup: F) -> Result<()>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
+    relink_with_cleanup(o, executable, before_cleanup, |path| {
+        std::fs::remove_dir_all(path)
     })
+}
+
+fn relink_with_cleanup<F, C>(
+    o: &UpdateOptions,
+    executable: &Path,
+    before_cleanup: F,
+    cleanup: C,
+) -> Result<()>
+where
+    F: FnOnce(&Path) -> Result<()>,
+    C: FnOnce(&Path) -> std::io::Result<()>,
+{
+    relink_with_checkpoint_loader(
+        o,
+        executable,
+        before_cleanup,
+        cleanup,
+        recovery::Journal::load,
+    )
+}
+
+fn relink_with_checkpoint_loader<F, C, L>(
+    o: &UpdateOptions,
+    executable: &Path,
+    before_cleanup: F,
+    cleanup: C,
+    load_checkpoint: L,
+) -> Result<()>
+where
+    F: FnOnce(&Path) -> Result<()>,
+    C: FnOnce(&Path) -> std::io::Result<()>,
+    L: FnOnce(&Path) -> Result<Option<recovery::Journal>>,
+{
+    let manifest_path = root(o.root.as_deref())?.join(".config/agent-home/manifest.json");
+    if !manifest_path.is_file() {
+        println!(
+            "No manifest recorded at {}; skipping re-link",
+            manifest_path.display()
+        );
+        before_cleanup(manifest_path.parent().context("manifest has no parent")?)?;
+        return Ok(());
+    }
+    let journal_dir = tempfile::Builder::new()
+        .prefix(".vesica-relink-")
+        .tempdir_in(manifest_path.parent().context("manifest has no parent")?)?;
+    let journal_path = journal_dir.path().join("transaction.json");
+    let mut result = run_manifest_relink_from_path(
+        executable,
+        &manifest_path,
+        o.repos_dir.as_deref(),
+        Some(&machine_root(o.root.as_deref())?),
+        &journal_path,
+    );
+    if let Err(cleanup) = before_cleanup(journal_dir.path()) {
+        result = match result {
+            Ok(()) => Err(anyhow::anyhow!("re-link cleanup failed: {cleanup:#}")),
+            Err(error) => Err(anyhow::anyhow!(
+                "{error:#}; re-link cleanup failed: {cleanup:#}"
+            )),
+        };
+    }
+    let mut errors = Vec::new();
+    if result.is_err() {
+        if let Err(error) = recovery::Journal::rollback_file(&journal_path) {
+            errors.push(format!("configuration rollback failed: {error:#}"));
+        }
+    }
+    if !errors.is_empty()
+        || result
+            .as_ref()
+            .is_err_and(|e| format!("{e:#}").contains("cleanup failed"))
+    {
+        let retained = journal_dir.keep();
+        errors.push(format!(
+            "recovery journal retained at {}; resolve conflicts then retry",
+            retained.display()
+        ));
+    } else {
+        // Remove payloads before the journal itself; a cleanup failure retains recoverable state.
+        let journal_parent = journal_dir.path().to_owned();
+        // Hold the checkpoint until cleanup is accepted: removal can unlink the
+        // journal before failing, and a missing file is not rollback evidence.
+        let checkpoint = match load_checkpoint(&journal_path) {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => {
+                // Loading failed after migration; never let TempDir discard the durable
+                // checkpoint. Retry only recovery, not migration, then retain evidence.
+                if let Err(rollback) = recovery::Journal::rollback_file(&journal_path) {
+                    errors.push(format!("configuration rollback failed: {rollback:#}"));
+                }
+                let retained = journal_dir.keep();
+                anyhow::bail!(
+                    "checkpoint load failed: {error:#}; {}; recovery journal retained at {}",
+                    errors.join("; "),
+                    retained.display()
+                );
+            }
+        };
+        if let Err(error) = cleanup(&journal_parent) {
+            if let Some(mut checkpoint) = checkpoint {
+                if let Err(rollback) = checkpoint.rollback() {
+                    errors.push(format!("configuration rollback failed: {rollback:#}"));
+                }
+                if let Err(save) = checkpoint.save() {
+                    errors.push(format!("recovery evidence recreation failed: {save:#}"));
+                }
+            }
+            let retained = journal_dir.keep();
+            errors.push(format!(
+                "re-link cleanup failed: {error}; recovery journal retained at {}",
+                retained.display()
+            ));
+        }
+    }
+    match (result, errors.is_empty()) {
+        (Err(error), true) => Err(error),
+        (Err(error), false) => anyhow::bail!("{error:#}; {}", errors.join("; ")),
+        (Ok(()), false) => anyhow::bail!("{}", errors.join("; ")),
+        (Ok(()), true) => Ok(()),
+    }
 }
 
 /// `vesica new-skill` (plan §5.4): scaffold a skill on a branch. A person edits it and opens the
@@ -756,10 +1256,7 @@ fn sync_standards(o: SyncStandardsOptions) -> Result<()> {
 
 /// The person's Git author name, used as the promoted note's `owner`.
 fn git_author_name(shared: &Path) -> Result<String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(shared)
-        .args(["var", "GIT_AUTHOR_IDENT"])
+    let out = ah_vault::git::command(shared, &["var", "GIT_AUTHOR_IDENT"], false)
         .output()
         .context("starting git to read your Git identity")?;
     if !out.status.success() {
@@ -784,8 +1281,17 @@ fn git_author_name(shared: &Path) -> Result<String> {
 /// checks (lint and vault-scan) gate the commit, and a failed gate rolls the branch back.
 fn share(o: ShareOptions) -> Result<()> {
     use ah_vault::share::{self, ShareRequest};
-    let vault = root(o.root.as_deref())?;
     let resolved = resolve_home_repo(&o.options, o.root.as_deref())?;
+    let (vault, _source) =
+        ah_core::local::resolve(o.vault.clone(), resolved.local.vault.clone(), None, None);
+    let vault = vault.ok_or_else(|| {
+        anyhow::anyhow!(
+            "no personal vault configured: pass --vault <path>, set VESICA_VAULT, or add `vault` to {}",
+            ah_core::LocalConfig::path_in(&resolved.config_dir).display()
+        )
+    })?;
+    let vault = std::fs::canonicalize(&vault)
+        .with_context(|| format!("personal vault path does not exist: {}", vault.display()))?;
     let shared = resolved.home_repo.canonicalize().with_context(|| {
         format!(
             "shared-home path does not exist: {}",
@@ -889,12 +1395,10 @@ fn share(o: ShareOptions) -> Result<()> {
         plan.branch
     );
     if o.open_pr {
-        let status = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&shared)
-            .args(["push", "-u", "origin", &plan.branch])
-            .status()
-            .context("starting git push")?;
+        let status =
+            ah_vault::git::command(&shared, &["push", "-u", "origin", &plan.branch], false)
+                .status()
+                .context("starting git push")?;
         if !status.success() {
             anyhow::bail!("git push failed; the commit is local on {}", plan.branch);
         }
@@ -978,7 +1482,18 @@ fn vault(command: VaultCommand) -> Result<()> {
 }
 
 fn vault_scan(path: &Path) -> Result<()> {
-    let findings = ah_vault::scan_secrets(path)?;
+    let report = ah_vault::scan_report(path)?;
+    println!(
+        "Scanned {} text file(s) (bounded UTF-8, <=2,000,000 bytes; heuristic, not comprehensive)",
+        report.scanned_files
+    );
+    for asset in &report.excluded_assets {
+        println!(
+            "Excluded/unscanned asset: {} (image/PDF exemption; not counted as clean)",
+            asset.display()
+        );
+    }
+    let findings = report.findings;
     if findings.is_empty() {
         println!(
             "No common credential patterns found under {}",
@@ -1302,12 +1817,7 @@ fn doctor(o: &DoctorOptions) -> Result<()> {
 /// Read-only and offline: it never fetches, so `status` stays safe to run anywhere.
 fn detected_ref(shared: &Path) -> Option<String> {
     let git = |args: &[&str]| -> Option<String> {
-        let output = std::process::Command::new("git")
-            .arg("-C")
-            .arg(shared)
-            .args(args)
-            .output()
-            .ok()?;
+        let output = ah_vault::git::command(shared, args, true).output().ok()?;
         if !output.status.success() {
             return None;
         }
@@ -1330,10 +1840,7 @@ fn detected_ref(shared: &Path) -> Option<String> {
 
 /// The branch a checkout is on, or a short sha when detached.
 fn detected_branch(shared: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(shared)
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+    let output = ah_vault::git::command(shared, &["rev-parse", "--abbrev-ref", "HEAD"], true)
         .output()
         .ok()?;
     if !output.status.success() {
@@ -1366,12 +1873,7 @@ fn pin_mismatch(pin: &str, shared: &Path) -> Option<String> {
 
 /// Local release tags. Never fetches: drift reports only what this checkout already knows.
 fn local_tags(shared: &Path) -> Vec<String> {
-    let output = match std::process::Command::new("git")
-        .arg("-C")
-        .arg(shared)
-        .args(["tag", "--list"])
-        .output()
-    {
+    let output = match ah_vault::git::command(shared, &["tag", "--list"], true).output() {
         Ok(output) if output.status.success() => output,
         _ => return Vec::new(),
     };
@@ -1405,16 +1907,35 @@ fn compatibility_blocker(c: &ah_core::AgentHomeConfig, detected: Option<&str>) -
 }
 
 fn install(o: InstallOptions) -> Result<()> {
-    let resolved = resolve_home_repo(&o.options, o.root.as_deref())?;
+    install_with_recovery(o, None)
+}
+
+fn install_with_recovery(o: InstallOptions, recovery_path: Option<&Path>) -> Result<()> {
+    install_impl(o, recovery_path, || Ok(()))
+}
+
+fn install_impl<F>(o: InstallOptions, recovery_path: Option<&Path>, before_seal: F) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    let InstallOptions {
+        home_repo,
+        root,
+        profile,
+        dry_run,
+        repos_dir,
+        vault,
+    } = o;
+    let options = Options { home_repo, profile };
+    let resolved = resolve_home_repo(&options, root.as_deref())?;
+    let vault = vault.or_else(|| resolved.local.vault.clone());
     let (c, _) = load(&resolved.home_repo, &resolved.local)?;
-    let (selected, _profile_source) = prof(&o.options, &resolved.local, &c);
-    let home = match o.root {
-        Some(p) => p,
-        None => std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .context("HOME is not set")?,
-    };
+    let selected = profile
+        .map(ProfileArg::text)
+        .unwrap_or_else(|| prof(&options, &resolved.local, &c).0);
+    let home = machine_root(root.as_deref())?;
     let cfg = resolved.config_dir.clone();
+    validate_manifest_scope(&ah_core::Manifest::default(), &home, &cfg)?;
     let shared = resolved.home_repo.canonicalize().with_context(|| {
         format!(
             "shared-home path does not exist: {}",
@@ -1437,16 +1958,38 @@ fn install(o: InstallOptions) -> Result<()> {
     }
     // Install step 3 (D-H): with --vault the shared home is linked at <vault>/Team instead of
     // ~/Team, unless the shared-home checkout already lives there (plan step 4 layout).
-    let vault = match &o.vault {
-        Some(dir) => Some(
-            std::path::absolute(dir)
-                .with_context(|| format!("cannot resolve --vault {}", dir.display()))?,
-        ),
+    let vault = match &vault {
+        Some(dir) => {
+            let absolute = std::path::absolute(dir)
+                .with_context(|| format!("cannot resolve --vault {}", dir.display()))?;
+            reject_symlink_components(&absolute)?;
+            Some(absolute)
+        }
         None => None,
     };
     let team_link = vault
         .as_ref()
         .map_or_else(|| home.join("Team"), |v| v.join("Team"));
+    let resolved_root = canonical_path_with_missing(&home)?;
+    if let Some(vault) = &vault {
+        // Explicit --vault authorizes the initial external location. Reinstalling an already
+        // recorded external vault is authorized only by config.toml, never by manifest.json.
+        if !vault.starts_with(&resolved_root) {
+            let configured = resolved
+                .local
+                .vault
+                .as_deref()
+                .map(canonical_path_with_missing)
+                .transpose()?;
+            let requested = canonical_path_with_missing(vault)?;
+            if configured
+                .as_ref()
+                .is_some_and(|configured| configured != &requested)
+            {
+                anyhow::bail!("--vault does not match the vault in local config");
+            }
+        }
+    }
     let team_in_place = vault.is_some()
         && !team_link.is_symlink()
         && team_link.canonicalize().ok().as_ref() == Some(&shared);
@@ -1481,7 +2024,7 @@ fn install(o: InstallOptions) -> Result<()> {
         "export COPILOT_CUSTOM_INSTRUCTIONS_DIRS={}",
         shell_quote(&copilot_dirs)?
     ));
-    if let (false, Some(dir)) = (profile.profile == ah_core::Profile::Core, &o.repos_dir) {
+    if let (false, Some(dir)) = (profile.profile == ah_core::Profile::Core, &repos_dir) {
         let dir = std::path::absolute(dir)
             .with_context(|| format!("cannot resolve --repos-dir {}", dir.display()))?;
         exports.push(shell_export(prefix, "REPOS", path_text(&dir)?)?);
@@ -1553,6 +2096,16 @@ fn install(o: InstallOptions) -> Result<()> {
             body: format!("if [ -f {env_path} ]; then . {env_path}; fi"),
         },
     ]);
+    for role in ah_agents::discover_roles(&shared.join("Agents/Roles"))? {
+        let (name, content) = ah_agents::render_opencode_role(&role, &c.team.role_prefix);
+        let path = home
+            .join(".config/opencode/agents")
+            .join(format!("{name}.md"));
+        actions.push(ah_core::Action::WriteFile {
+            path: path.to_string_lossy().into_owned(),
+            content,
+        });
+    }
     let mut planner = ah_core::Planner::new();
     for a in actions {
         planner.push(a)?
@@ -1573,10 +2126,10 @@ fn install(o: InstallOptions) -> Result<()> {
         .iter()
         .map(|repo| repo.name.as_str())
         .collect::<Vec<_>>();
-    let plan = planner.finish(o.dry_run);
+    let plan = planner.finish(dry_run);
     println!(
         "{} install plan (profile: {selected}; eligible repositories: {})",
-        if o.dry_run {
+        if dry_run {
             "DRY RUN"
         } else {
             "Applying supported actions"
@@ -1589,7 +2142,7 @@ fn install(o: InstallOptions) -> Result<()> {
     );
     // Install step 10: plan repository clones read-only, before any mutation, so an unusable
     // repos directory fails closed.
-    let repo_plan = match (&profile.profile, &o.repos_dir) {
+    let repo_plan = match (&profile.profile, &repos_dir) {
         (ah_core::Profile::Core, _) => Err(
             "Repository cloning skipped: the core profile does not clone repositories".to_owned(),
         ),
@@ -1599,8 +2152,24 @@ fn install(o: InstallOptions) -> Result<()> {
         )),
         (_, Some(dir)) => Ok((dir.clone(), repos::plan(&profile.repositories, dir)?)),
     };
-    // Refuse unsafe state paths before creating backups or executing any action.
-    if !o.dry_run {
+    let local_path = ah_core::LocalConfig::path_in(&cfg);
+    let mut local_preimage = None;
+    if !dry_run {
+        let local_metadata = match std::fs::symlink_metadata(&local_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                anyhow::bail!(
+                    "Vesica local config path must be a regular file: {}",
+                    local_path.display()
+                );
+            }
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        local_preimage = match local_metadata {
+            Some(metadata) => Some((std::fs::read(&local_path)?, metadata.permissions())),
+            None => None,
+        };
         let metadata = match std::fs::symlink_metadata(&cfg) {
             Ok(metadata) => Some(metadata),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -1628,11 +2197,45 @@ fn install(o: InstallOptions) -> Result<()> {
             );
         }
         let existing = ah_core::Manifest::load(&manifest_path)?;
+        validate_manifest_scope(&existing, &home, &cfg)?;
         for action in &plan.actions {
             let target = Path::new(action.key());
+            let target_metadata = match std::fs::symlink_metadata(target) {
+                Ok(metadata) => Some(metadata),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            };
+            match action {
+                ah_core::Action::WriteFile { .. }
+                | ah_core::Action::UpsertBlock { .. }
+                | ah_core::Action::MergeJsonc { .. }
+                | ah_core::Action::MergeToml { .. }
+                    if target_metadata.as_ref().is_some_and(|metadata| {
+                        metadata.file_type().is_symlink() || !metadata.is_file()
+                    }) =>
+                {
+                    anyhow::bail!(
+                        "managed file destination must be a regular file: {}",
+                        target.display()
+                    );
+                }
+                ah_core::Action::Symlink { .. }
+                    if target_metadata.is_some()
+                        && !existing.entries.contains_key(action.key()) =>
+                {
+                    anyhow::bail!("unmanaged destination already exists: {}", target.display());
+                }
+                _ => {}
+            }
             if let Some(record) = existing.entries.get(action.key()) {
                 match record.kind.as_str() {
                     "symlink" => {
+                        let metadata = target_metadata
+                            .as_ref()
+                            .context("recorded symlink target is missing")?;
+                        if !metadata.file_type().is_symlink() {
+                            anyhow::bail!("recorded symlink was replaced: {}", target.display());
+                        }
                         let current = std::fs::read_link(target).with_context(|| {
                             format!("recorded symlink missing: {}", target.display())
                         })?;
@@ -1650,21 +2253,52 @@ fn install(o: InstallOptions) -> Result<()> {
                             anyhow::bail!("recorded symlink was modified: {}", target.display());
                         }
                     }
-                    "managed-block" | "merged-file" => {
-                        let current = std::fs::read(target).with_context(|| {
-                            format!("recorded managed file missing: {}", target.display())
-                        })?;
-                        let current_hash = {
-                            use sha2::Digest;
-                            hex::encode(sha2::Sha256::digest(&current))
-                        };
-                        if record.installed_sha256.as_deref() != Some(current_hash.as_str()) {
+                    "generated-file" => match target_metadata.as_ref() {
+                        None => {}
+                        Some(metadata)
+                            if metadata.is_file() && !metadata.file_type().is_symlink() =>
+                        {
+                            let current = std::fs::read(target)?;
+                            let hash = {
+                                use sha2::Digest;
+                                hex::encode(sha2::Sha256::digest(current))
+                            };
+                            if record.installed_sha256.as_deref() != Some(hash.as_str()) {
+                                anyhow::bail!(
+                                    "recorded generated file was modified: {}",
+                                    target.display()
+                                );
+                            }
+                        }
+                        Some(_) => anyhow::bail!(
+                            "recorded generated file is not a regular file: {}",
+                            target.display()
+                        ),
+                    },
+                    "managed-block" | "merged-file" => match target_metadata.as_ref() {
+                        Some(metadata)
+                            if metadata.file_type().is_symlink() || !metadata.is_file() =>
+                        {
                             anyhow::bail!(
-                                "recorded managed file was modified: {}",
+                                "recorded managed target is not a regular file: {}",
                                 target.display()
                             );
                         }
-                    }
+                        Some(_) => {
+                            let bytes = std::fs::read(target)?;
+                            let current_hash = {
+                                use sha2::Digest;
+                                hex::encode(sha2::Sha256::digest(&bytes))
+                            };
+                            if record.installed_sha256.as_deref() != Some(current_hash.as_str()) {
+                                anyhow::bail!(
+                                    "recorded managed file was modified: {}",
+                                    target.display()
+                                );
+                            }
+                        }
+                        None => {}
+                    },
                     kind => anyhow::bail!(
                         "unsupported manifest entry kind {kind} at {}",
                         target.display()
@@ -1674,6 +2308,16 @@ fn install(o: InstallOptions) -> Result<()> {
                 match action {
                     ah_core::Action::Symlink { .. } => {
                         anyhow::bail!("unmanaged destination already exists: {}", target.display())
+                    }
+                    ah_core::Action::WriteFile { .. } => {
+                        let existing = std::fs::symlink_metadata(target)?;
+                        if !existing.is_file() || existing.file_type().is_symlink() {
+                            anyhow::bail!(
+                                "generated-file destination is not a regular file: {}",
+                                target.display()
+                            );
+                        }
+                        anyhow::bail!("unmanaged destination already exists: {}", target.display());
                     }
                     ah_core::Action::UpsertBlock { .. } if target.is_file() => {
                         let contents = std::fs::read_to_string(target)?;
@@ -1695,22 +2339,55 @@ fn install(o: InstallOptions) -> Result<()> {
             }
         }
     }
+    // Prepare and sync the actual local-state replacement before unmanaged vault writes.
+    // This checks parent write permissions without committing uninstalled machine facts.
+    let local_before = recovery::Node::read(&local_path)?;
+    let mut prepared_local = if dry_run {
+        None
+    } else {
+        let mut local = resolved.local.clone();
+        local.home_repo = Some(shared.to_path_buf());
+        if let Some(profile) = options.profile {
+            local.profile = Some(profile_value(profile));
+        }
+        if let Some(v) = &vault {
+            local.vault = Some(v.clone());
+        }
+        if let Some(dir) = &repos_dir {
+            local.repos_dir = Some(
+                std::path::absolute(dir)
+                    .with_context(|| format!("cannot resolve --repos-dir {}", dir.display()))?,
+            );
+        }
+        std::fs::create_dir_all(&cfg)?;
+        let mut temporary = tempfile::Builder::new()
+            .prefix(".vesica-local-")
+            .tempfile_in(&cfg)
+            .with_context(|| format!("cannot prepare local configuration in {}", cfg.display()))?;
+        use std::io::Write;
+        temporary.write_all(local.to_toml()?.as_bytes())?;
+        if let Some((_, permissions)) = &local_preimage {
+            temporary.as_file().set_permissions(permissions.clone())?;
+        }
+        temporary.as_file().sync_all()?;
+        Some(temporary)
+    };
     // Vault scaffolding runs only after every refusal above. It is personal data: never
     // overwritten, not recorded in the manifest, and kept by uninstall (like cloned repositories).
     if let Some(vault) = &vault {
         let adopt = std::fs::read_dir(vault).is_ok_and(|mut entries| entries.next().is_some());
         let date = utc_date();
         let changes = if adopt {
-            ah_vault::personal::fix(vault, &date, o.dry_run)?
+            ah_vault::personal::fix(vault, &date, dry_run)?
         } else {
-            ah_vault::personal::init(vault, &date, o.dry_run)?
+            ah_vault::personal::init(vault, &date, dry_run)?
         };
         println!(
             "Vault: {} ({})",
             vault.display(),
             if adopt { "adopting" } else { "creating" }
         );
-        print_vault_changes(&changes, o.dry_run);
+        print_vault_changes(&changes, dry_run);
         if team_in_place {
             println!(
                 "Team: the shared home is already at {} (no link needed)",
@@ -1719,7 +2396,7 @@ fn install(o: InstallOptions) -> Result<()> {
         }
     }
     let mut pending_backups = Vec::new();
-    let backups = if o.dry_run {
+    let backups = if dry_run {
         std::collections::BTreeMap::new()
     } else {
         let old = ah_core::Manifest::load(&cfg.join("manifest.json"))?;
@@ -1802,6 +2479,26 @@ fn install(o: InstallOptions) -> Result<()> {
         }
         result
     };
+    let mut recovery_journal = match recovery_path {
+        Some(path) if !dry_run => {
+            let mut paths: Vec<PathBuf> = plan
+                .actions
+                .iter()
+                .map(|a| PathBuf::from(a.key()))
+                .collect();
+            paths.extend([local_path.clone(), cfg.join("manifest.json")]);
+            paths.extend(pending_backups.iter().map(|(path, _)| path.clone()));
+            let old = ah_core::Manifest::load(&cfg.join("manifest.json"))?;
+            paths.extend(
+                old.entries
+                    .values()
+                    .filter(|e| matches!(e.kind.as_str(), "symlink" | "generated-file"))
+                    .map(|e| PathBuf::from(&e.target)),
+            );
+            Some(recovery::Journal::prepare(path, paths)?)
+        }
+        _ => None,
+    };
     let outcomes = ah_core::action::Executor.execute_with_commit(&plan, |outcomes| {
         if plan.dry_run {
             return Ok(());
@@ -1809,7 +2506,12 @@ fn install(o: InstallOptions) -> Result<()> {
         if outcomes.contains(&ah_core::ActionOutcome::Collision) {
             anyhow::bail!("install stopped on an existing destination; no changes should be treated as fully applied");
         }
+        let local_preimage = local_preimage.as_ref();
         let created_backups = create_install_backups(&pending_backups)?;
+        let mut local_postimage = None;
+        let manifest_path = cfg.join("manifest.json");
+        let manifest_preimage = recovery::Node::read(&manifest_path)?;
+        let mut manifest_postimage = None;
         let persist_result = (|| -> Result<()> {
             let mut m = ah_core::Manifest::load(&cfg.join("manifest.json"))?;
             let previous = m.clone();
@@ -1817,23 +2519,12 @@ fn install(o: InstallOptions) -> Result<()> {
             m.home_ref = home_ref.clone();
             m.profile = selected.into();
             m.vault = vault.as_ref().map(|v| v.to_string_lossy().into_owned());
-            // F8: record the resolved machine values (home path, profile, vault, repos dir) in the
-            // local config, so later commands need no flag. Machine facts only: never team content.
-            let mut local = resolved.local.clone();
-            local.home_repo = Some(shared.to_path_buf());
-            if let Some(profile) = o.options.profile {
-                local.profile = Some(profile_value(profile));
+            // Commit only after managed actions succeed; preserve any intervening owner edit.
+            if !local_before.matches(&local_path)? {
+                anyhow::bail!("local configuration changed before commit; preserving user changes");
             }
-            if let Some(v) = &vault {
-                local.vault = Some(v.clone());
-            }
-            if let Some(dir) = &o.repos_dir {
-                local.repos_dir = Some(
-                    std::path::absolute(dir)
-                        .with_context(|| format!("cannot resolve --repos-dir {}", dir.display()))?,
-                );
-            }
-            local.write(&cfg)?;
+            reject_symlink_components(&cfg)?;
+            persist_prepared_local(prepared_local.take().context("local configuration was not prepared")?, &local_path, &mut local_postimage, |path| Ok(std::fs::read(path)?))?;
             for (a, r) in plan.actions.iter().zip(outcomes) {
                 if matches!(
                     r,
@@ -1849,11 +2540,33 @@ fn install(o: InstallOptions) -> Result<()> {
                     m.record(a, item);
                 }
             }
-            m.save_atomic(&cfg.join("manifest.json"))?;
+            let expected_manifest = recovery::Node::File {
+                bytes: serde_json::to_vec_pretty(&m)?,
+                permissions: {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::Permissions::from_mode(0o100600)
+                },
+            };
+            m.save_atomic(&manifest_path)?;
+            manifest_postimage = Some(expected_manifest);
+            if let Some(journal) = recovery_journal.as_mut() {
+                before_seal()?;
+                journal.seal()?;
+            }
             Ok(())
         })();
         let cleanup_errors = if persist_result.is_err() {
-            remove_install_backups(&created_backups, &pending_backups)
+            let mut errors = remove_install_backups(&created_backups, &pending_backups);
+            if let Some(postimage) = &manifest_postimage {
+                if let Err(error) = manifest_preimage.restore(&manifest_path, postimage) {
+                    errors.push(format!("manifest rollback failed: {error:#}"));
+                }
+            }
+            match restore_local_config(&local_path, local_preimage, local_postimage.as_ref()) {
+                Ok(()) => {}
+                Err(error) => errors.push(format!("{}: {error:#}", local_path.display())),
+            }
+            errors
         } else {
             Vec::new()
         };
@@ -1869,8 +2582,18 @@ fn install(o: InstallOptions) -> Result<()> {
     for (a, r) in plan.actions.iter().zip(&outcomes) {
         println!("{r:?}: {}", a.key())
     }
-    prune_stale_links(&cfg, &plan, o.dry_run)?;
-    if o.dry_run {
+    prune_stale_impl(
+        &cfg,
+        &plan,
+        &home,
+        dry_run,
+        recovery_journal.as_mut(),
+        |_, _| Ok(()),
+    )?;
+    if let Some(journal) = recovery_journal.as_mut() {
+        journal.seal()?;
+    }
+    if dry_run {
         match &repo_plan {
             Err(message) => println!("{message}"),
             Ok((_, steps)) => {
@@ -2012,16 +2735,60 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let year = yoe + era * 400 + i64::from(month <= 2);
     (year, month, day)
 }
+fn persist_prepared_local<F>(
+    prepared: tempfile::NamedTempFile,
+    path: &Path,
+    postimage: &mut Option<recovery::Node>,
+    read_after: F,
+) -> Result<()>
+where
+    F: FnOnce(&Path) -> Result<Vec<u8>>,
+{
+    let expected = recovery::Node::read(prepared.path())?;
+    prepared
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("cannot safely persist {}", path.display()))?;
+    *postimage = Some(expected);
+    read_after(path)?;
+    Ok(())
+}
+
+fn restore_local_config(
+    path: &Path,
+    preimage: Option<&(Vec<u8>, std::fs::Permissions)>,
+    expected_current: Option<&recovery::Node>,
+) -> Result<()> {
+    let before = match preimage {
+        Some((bytes, permissions)) => recovery::Node::File {
+            bytes: bytes.clone(),
+            permissions: permissions.clone(),
+        },
+        None => recovery::Node::Absent,
+    };
+    if let Some(expected) = expected_current {
+        before.restore(path, expected)
+    } else if before.matches(path)? {
+        Ok(())
+    } else {
+        anyhow::bail!("local config changed during install; preserved")
+    }
+}
+
 fn create_install_backups(pending: &[(PathBuf, Vec<u8>)]) -> Result<Vec<PathBuf>> {
     use std::io::Write;
 
     let mut created = Vec::new();
     for (path, contents) in pending {
         let write_result = (|| -> std::io::Result<()> {
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)?;
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(path)?;
             created.push(path.clone());
             file.write_all(contents)
         })();
@@ -2086,6 +2853,7 @@ fn entry(a: &ah_core::Action, backup_path: Option<&PathBuf>) -> Result<ah_core::
         ah_core::Action::MergeJsonc { .. } | ah_core::Action::MergeToml { .. } => {
             ("merged-file", None)
         }
+        ah_core::Action::WriteFile { .. } => ("generated-file", None),
         _ => ("file", None),
     };
     let bytes = std::fs::read(p).unwrap_or_default();
@@ -2105,10 +2873,19 @@ fn entry(a: &ah_core::Action, backup_path: Option<&PathBuf>) -> Result<ah_core::
         installed_sha256,
     })
 }
-fn root(r: Option<&Path>) -> Result<PathBuf> {
-    r.map(Path::to_path_buf)
+fn machine_root(r: Option<&Path>) -> Result<PathBuf> {
+    let path = r
+        .map(Path::to_path_buf)
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-        .context("HOME is not set")
+        .context("HOME is not set")?;
+    let absolute = std::path::absolute(&path)
+        .with_context(|| format!("cannot resolve machine root {}", path.display()))?;
+    // Machine roots and their ancestors must be real directories, not aliases into another tree.
+    reject_symlink_components(&absolute)?;
+    Ok(absolute)
+}
+fn root(r: Option<&Path>) -> Result<PathBuf> {
+    machine_root(r)
 }
 fn status(r: Option<&Path>) -> Result<()> {
     let p = root(r)?.join(".config/agent-home/manifest.json");
@@ -2147,7 +2924,28 @@ Recorded entries: {}",
     Ok(())
 }
 fn uninstall(r: Option<&Path>, dry: bool) -> Result<()> {
+    uninstall_impl(r, dry, |_, _| Ok(()))
+}
+
+fn uninstall_impl<F>(r: Option<&Path>, dry: bool, before_mutation: F) -> Result<()>
+where
+    F: FnMut(usize, &Path) -> Result<()>,
+{
+    uninstall_with_postimage_reader(r, dry, before_mutation, recovery::Node::read)
+}
+
+fn uninstall_with_postimage_reader<F, P>(
+    r: Option<&Path>,
+    dry: bool,
+    mut before_mutation: F,
+    mut read_postimage: P,
+) -> Result<()>
+where
+    F: FnMut(usize, &Path) -> Result<()>,
+    P: FnMut(&Path) -> Result<recovery::Node>,
+{
     use sha2::Digest;
+    let mut mutation_count = 0;
     let p = root(r)?.join(".config/agent-home/manifest.json");
     if let Ok(metadata) = std::fs::symlink_metadata(&p) {
         if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -2158,6 +2956,9 @@ fn uninstall(r: Option<&Path>, dry: bool) -> Result<()> {
         }
     }
     let mut m = ah_core::Manifest::load(&p)?;
+    let machine_root = machine_root(r)?;
+    let managed_root = machine_root.join(".config/agent-home");
+    validate_manifest_scope(&m, &machine_root, &managed_root)?;
     // Do not let atomic manifest persistence fail on a known collision after
     // uninstall has already removed managed links or restored user files.
     if !dry {
@@ -2211,229 +3012,397 @@ fn uninstall(r: Option<&Path>, dry: bool) -> Result<()> {
         println!("Nothing recorded; no changes made.");
         return Ok(());
     }
+    // Inspect every target and compute restorations before the first mutation. Progress is saved
+    // before removals so a later filesystem error never leaves stale ownership for completed work.
     let mut retained = std::collections::BTreeMap::new();
-    for (key, entry) in std::mem::take(&mut m.entries) {
+    for (key, entry) in m.entries.clone() {
         let target = Path::new(&entry.target);
-        match entry.kind.as_str() {
-            "symlink" => {
-                let link = std::fs::read_link(target).ok().map(|p| {
-                    if p.is_absolute() {
-                        p
-                    } else {
-                        target.parent().unwrap_or(Path::new(".")).join(p)
-                    }
-                });
-                let expected = entry.source.as_deref().map(Path::new).map(|p| {
-                    if p.is_absolute() {
-                        p.to_path_buf()
-                    } else {
-                        std::env::current_dir().unwrap_or_default().join(p)
-                    }
-                });
-                if link != expected {
-                    println!("Skipped modified, missing or unverifiable symlink: {key}");
-                    retained.insert(key, entry);
-                } else {
-                    println!(
-                        "{}: {key}",
-                        if dry {
-                            "Would remove symlink"
-                        } else {
-                            "Removing symlink"
+        let preimage = recovery::Node::read(target)?;
+        let mut expected_postimage = recovery::Node::Absent;
+        let result = (|| -> Result<()> {
+            match entry.kind.as_str() {
+                "symlink" => {
+                    match std::fs::symlink_metadata(target) {
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            println!("Skipped missing managed target: {key}");
+                            return Ok(());
                         }
-                    );
-                    if !dry {
-                        std::fs::remove_file(target)?;
+                        Err(error) => return Err(error.into()),
+                        Ok(metadata) if !metadata.file_type().is_symlink() => {
+                            println!("Skipped replaced managed target: {key}");
+                            retained.insert(key.clone(), entry.clone());
+                            return Ok(());
+                        }
+                        Ok(_) => {}
                     }
-                }
-            }
-            "merged-file" => {
-                // A merge can't be undone by stripping a block, so only an exact backup restore
-                // (or removing a file Vesica created) is safe.
-                let current = std::fs::read(target)?;
-                let installed_matches = entry
-                    .installed_sha256
-                    .as_deref()
-                    .map(|hash| hex::encode(sha2::Sha256::digest(&current)) == hash)
-                    .unwrap_or(false);
-                if !installed_matches {
-                    println!("Skipped modified merged file: {key}");
-                    retained.insert(key, entry);
-                    continue;
-                }
-                match entry.backup.as_deref().map(Path::new) {
-                    None => {
+                    let link = std::fs::read_link(target).ok().map(|p| {
+                        if p.is_absolute() {
+                            p
+                        } else {
+                            target.parent().unwrap_or(Path::new(".")).join(p)
+                        }
+                    });
+                    let expected = entry.source.as_deref().map(Path::new).map(|p| {
+                        if p.is_absolute() {
+                            p.to_path_buf()
+                        } else {
+                            std::env::current_dir().unwrap_or_default().join(p)
+                        }
+                    });
+                    if link != expected {
+                        println!("Skipped modified symlink: {key}");
+                        retained.insert(key.clone(), entry.clone());
+                    } else {
                         println!(
                             "{}: {key}",
                             if dry {
-                                "Would remove created merged file"
+                                "Would remove symlink"
                             } else {
-                                "Removing created merged file"
+                                "Removing symlink"
                             }
                         );
                         if !dry {
+                            mutation_count += 1;
+                            before_mutation(mutation_count, target)?;
+                            if !preimage.matches(target)? {
+                                anyhow::bail!("uninstall target changed before mutation; preserving user changes: {}", target.display());
+                            }
                             std::fs::remove_file(target)?;
                         }
                     }
-                    Some(backup_path) => {
-                        let Some(expected) = entry.original_sha256.as_deref() else {
-                            println!("Skipped merged file without original hash: {key}");
-                            retained.insert(key, entry);
-                            continue;
-                        };
-                        let backup = match std::fs::read(backup_path) {
-                            Ok(bytes) => bytes,
-                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                                println!("Skipped missing backup: {key}");
-                                retained.insert(key, entry);
-                                continue;
-                            }
-                            Err(error) => return Err(error.into()),
-                        };
-                        if hex::encode(sha2::Sha256::digest(&backup)) != expected {
-                            println!("Skipped altered backup: {key}");
-                            retained.insert(key, entry);
-                            continue;
-                        }
-                        println!(
-                            "{}: {key}",
-                            if dry {
-                                "Would restore original merged file"
-                            } else {
-                                "Restoring original merged file"
-                            }
-                        );
-                        if !dry {
-                            std::fs::write(target, backup)?;
-                        }
-                    }
                 }
-            }
-            "managed-block" => {
-                let backup_path = entry.backup.as_deref().map(Path::new);
-                if backup_path.is_none() {
-                    let current = std::fs::read_to_string(target)?;
-                    let installed_matches = entry
+                "generated-file" => {
+                    let metadata = match std::fs::symlink_metadata(target) {
+                        Ok(metadata) => metadata,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            println!("Skipped missing generated file: {key}");
+                            return Ok(());
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
+                    if !metadata.is_file() || metadata.file_type().is_symlink() {
+                        println!("Skipped replaced generated file: {key}");
+                        retained.insert(key.clone(), entry.clone());
+                        return Ok(());
+                    }
+                    let current = std::fs::read(target)?;
+                    let matches = entry
                         .installed_sha256
                         .as_deref()
-                        .map(|hash| hex::encode(sha2::Sha256::digest(current.as_bytes())) == hash)
+                        .map(|expected| hex::encode(sha2::Sha256::digest(&current)) == expected)
                         .unwrap_or(false);
-                    if !installed_matches {
-                        println!("Skipped modified managed file: {key}");
-                        retained.insert(key, entry);
-                        continue;
-                    }
-                    let cleaned = ah_config::block::remove(
-                        &current,
-                        ah_config::block::CommentStyle::Hash,
-                        "vesica",
-                    );
-                    if !cleaned.is_empty() {
-                        println!(
-                            "Skipped new managed file with unexpected unmanaged content: {key}"
-                        );
-                        retained.insert(key, entry);
-                        continue;
+                    if !matches {
+                        println!("Skipped modified generated file: {key}");
+                        retained.insert(key.clone(), entry.clone());
+                        return Ok(());
                     }
                     println!(
                         "{}: {key}",
                         if dry {
-                            "Would remove new managed file"
+                            "Would remove generated file"
                         } else {
-                            "Removing new managed file"
+                            "Removing generated file"
                         }
                     );
                     if !dry {
+                        mutation_count += 1;
+                        before_mutation(mutation_count, target)?;
+                        if !preimage.matches(target)? {
+                            anyhow::bail!("uninstall target changed before mutation; preserving user changes: {}", target.display());
+                        }
                         std::fs::remove_file(target)?;
                     }
-                    continue;
                 }
-                let Some(expected_hash) = entry.original_sha256.as_deref() else {
-                    println!("Skipped block without original hash: {key}");
-                    retained.insert(key, entry);
-                    continue;
-                };
-                let backup_path = backup_path.unwrap();
-                let metadata = match std::fs::symlink_metadata(backup_path) {
-                    Ok(metadata) => metadata,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        println!("Skipped missing backup: {key}");
-                        retained.insert(key, entry);
-                        continue;
+                "merged-file" => {
+                    let metadata = match std::fs::symlink_metadata(target) {
+                        Ok(metadata) => metadata,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            println!("Skipped missing managed target: {key}");
+                            return Ok(());
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
+                    if metadata.file_type().is_symlink() || !metadata.is_file() {
+                        println!("Skipped replaced managed target: {key}");
+                        retained.insert(key.clone(), entry.clone());
+                        return Ok(());
                     }
-                    Err(error) => return Err(error.into()),
-                };
-                if !metadata.is_file() || metadata.file_type().is_symlink() {
-                    anyhow::bail!(
-                        "recorded backup is not a regular file: {}",
-                        backup_path.display()
+                    let current = std::fs::read(target)?;
+                    let installed_matches = entry
+                        .installed_sha256
+                        .as_deref()
+                        .map(|hash| hex::encode(sha2::Sha256::digest(&current)) == hash)
+                        .unwrap_or(false);
+                    if !installed_matches {
+                        println!("Skipped modified merged file: {key}");
+                        retained.insert(key.clone(), entry.clone());
+                        return Ok(());
+                    }
+                    match entry.backup.as_deref().map(Path::new) {
+                        None => {
+                            println!(
+                                "{}: {key}",
+                                if dry {
+                                    "Would remove created merged file"
+                                } else {
+                                    "Removing created merged file"
+                                }
+                            );
+                            if !dry {
+                                mutation_count += 1;
+                                before_mutation(mutation_count, target)?;
+                                if !preimage.matches(target)? {
+                                    anyhow::bail!("uninstall target changed before mutation; preserving user changes: {}", target.display());
+                                }
+                                std::fs::remove_file(target)?;
+                            }
+                        }
+                        Some(backup_path) => {
+                            let Some(expected) = entry.original_sha256.as_deref() else {
+                                println!("Skipped merged file without original hash: {key}");
+                                retained.insert(key.clone(), entry.clone());
+                                return Ok(());
+                            };
+                            let backup = match std::fs::read(backup_path) {
+                                Ok(bytes) => bytes,
+                                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                                    println!("Skipped missing backup: {key}");
+                                    retained.insert(key.clone(), entry.clone());
+                                    return Ok(());
+                                }
+                                Err(error) => return Err(error.into()),
+                            };
+                            if hex::encode(sha2::Sha256::digest(&backup)) != expected {
+                                println!("Skipped altered backup: {key}");
+                                retained.insert(key.clone(), entry.clone());
+                                return Ok(());
+                            }
+                            println!(
+                                "{}: {key}",
+                                if dry {
+                                    "Would restore original merged file"
+                                } else {
+                                    "Restoring original merged file"
+                                }
+                            );
+                            if !dry {
+                                mutation_count += 1;
+                                before_mutation(mutation_count, target)?;
+                                if !preimage.matches(target)? {
+                                    anyhow::bail!("uninstall target changed before mutation; preserving user changes: {}", target.display());
+                                }
+                                expected_postimage = recovery::Node::File {
+                                    bytes: backup.clone(),
+                                    permissions: match &preimage {
+                                        recovery::Node::File { permissions, .. } => {
+                                            permissions.clone()
+                                        }
+                                        _ => anyhow::bail!(
+                                            "restoration preimage must be a regular file"
+                                        ),
+                                    },
+                                };
+                                ah_core::action::atomic_replace_file(target, &backup)?;
+                            }
+                        }
+                    }
+                }
+                "managed-block" => {
+                    let metadata = match std::fs::symlink_metadata(target) {
+                        Ok(metadata) => metadata,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            println!("Skipped missing managed target: {key}");
+                            return Ok(());
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
+                    if metadata.file_type().is_symlink() || !metadata.is_file() {
+                        println!("Skipped replaced managed target: {key}");
+                        retained.insert(key.clone(), entry.clone());
+                        return Ok(());
+                    }
+                    let backup_path = entry.backup.as_deref().map(Path::new);
+                    if backup_path.is_none() {
+                        let current = std::fs::read_to_string(target)?;
+                        let installed_matches = entry
+                            .installed_sha256
+                            .as_deref()
+                            .map(|hash| {
+                                hex::encode(sha2::Sha256::digest(current.as_bytes())) == hash
+                            })
+                            .unwrap_or(false);
+                        if !installed_matches {
+                            println!("Skipped modified managed file: {key}");
+                            retained.insert(key.clone(), entry.clone());
+                            return Ok(());
+                        }
+                        let cleaned = ah_config::block::remove(
+                            &current,
+                            ah_config::block::CommentStyle::Hash,
+                            "vesica",
+                        );
+                        if !cleaned.is_empty() {
+                            println!(
+                                "Skipped new managed file with unexpected unmanaged content: {key}"
+                            );
+                            retained.insert(key.clone(), entry.clone());
+                            return Ok(());
+                        }
+                        println!(
+                            "{}: {key}",
+                            if dry {
+                                "Would remove new managed file"
+                            } else {
+                                "Removing new managed file"
+                            }
+                        );
+                        if !dry {
+                            mutation_count += 1;
+                            before_mutation(mutation_count, target)?;
+                            if !preimage.matches(target)? {
+                                anyhow::bail!("uninstall target changed before mutation; preserving user changes: {}", target.display());
+                            }
+                            std::fs::remove_file(target)?;
+                        }
+                        return Ok(());
+                    }
+                    let Some(expected_hash) = entry.original_sha256.as_deref() else {
+                        println!("Skipped block without original hash: {key}");
+                        retained.insert(key.clone(), entry.clone());
+                        return Ok(());
+                    };
+                    let backup_path = backup_path.unwrap();
+                    let metadata = match std::fs::symlink_metadata(backup_path) {
+                        Ok(metadata) => metadata,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            println!("Skipped missing backup: {key}");
+                            retained.insert(key.clone(), entry.clone());
+                            return Ok(());
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
+                    if !metadata.is_file() || metadata.file_type().is_symlink() {
+                        anyhow::bail!(
+                            "recorded backup is not a regular file: {}",
+                            backup_path.display()
+                        );
+                    }
+                    let backup = std::fs::read(backup_path)?;
+                    if hex::encode(sha2::Sha256::digest(&backup)) != expected_hash {
+                        println!("Skipped altered backup: {key}");
+                        retained.insert(key.clone(), entry.clone());
+                        return Ok(());
+                    }
+                    let original = String::from_utf8(backup).context("backup is not UTF-8")?;
+                    let current = std::fs::read_to_string(target)?;
+                    if entry
+                        .installed_sha256
+                        .as_deref()
+                        .map(|h| hex::encode(sha2::Sha256::digest(current.as_bytes())) != h)
+                        .unwrap_or(true)
+                    {
+                        println!("Skipped modified managed file: {key}");
+                        retained.insert(key.clone(), entry.clone());
+                        return Ok(());
+                    }
+                    // The file is exactly what install wrote (hash checked above). Restoring the
+                    // verified backup is exact when re-applying the install transform to it
+                    // reproduces the current bytes; this also covers originals without a final
+                    // newline, which block removal alone cannot reconstruct. Stripping the block is
+                    // kept as a fallback for older installs.
+                    let style = ah_config::block::CommentStyle::Hash;
+                    let restorable = ["vesica", "agent-home"].iter().any(|name| {
+                        ah_config::block::get(&current, style, name).is_some_and(|body| {
+                            ah_config::block::upsert(&original, style, name, &body) == current
+                        }) || ah_config::block::remove(&current, style, name) == original
+                    });
+                    if !restorable {
+                        println!("Skipped block because stripping the managed region would not restore backup: {key}");
+                        retained.insert(key.clone(), entry.clone());
+                        return Ok(());
+                    }
+                    println!(
+                        "{}: {key}",
+                        if dry {
+                            "Would restore original file"
+                        } else {
+                            "Restoring original file"
+                        }
                     );
-                }
-                let backup = std::fs::read(backup_path)?;
-                if hex::encode(sha2::Sha256::digest(&backup)) != expected_hash {
-                    println!("Skipped altered backup: {key}");
-                    retained.insert(key, entry);
-                    continue;
-                }
-                let original = String::from_utf8(backup).context("backup is not UTF-8")?;
-                let current = std::fs::read_to_string(target)?;
-                if entry
-                    .installed_sha256
-                    .as_deref()
-                    .map(|h| hex::encode(sha2::Sha256::digest(current.as_bytes())) != h)
-                    .unwrap_or(true)
-                {
-                    println!("Skipped modified managed file: {key}");
-                    retained.insert(key, entry);
-                    continue;
-                }
-                // The file is exactly what install wrote (hash checked above). Restoring the
-                // verified backup is exact when re-applying the install transform to it
-                // reproduces the current bytes; this also covers originals without a final
-                // newline, which block removal alone cannot reconstruct. Stripping the block is
-                // kept as a fallback for older installs.
-                let style = ah_config::block::CommentStyle::Hash;
-                let restorable = ["vesica", "agent-home"].iter().any(|name| {
-                    ah_config::block::get(&current, style, name).is_some_and(|body| {
-                        ah_config::block::upsert(&original, style, name, &body) == current
-                    }) || ah_config::block::remove(&current, style, name) == original
-                });
-                if !restorable {
-                    println!("Skipped block because stripping the managed region would not restore backup: {key}");
-                    retained.insert(key, entry);
-                    continue;
-                }
-                println!(
-                    "{}: {key}",
-                    if dry {
-                        "Would restore original file"
-                    } else {
-                        "Restoring original file"
+                    if !dry {
+                        mutation_count += 1;
+                        before_mutation(mutation_count, target)?;
+                        if !preimage.matches(target)? {
+                            anyhow::bail!("uninstall target changed before mutation; preserving user changes: {}", target.display());
+                        }
+                        expected_postimage = recovery::Node::File {
+                            bytes: original.as_bytes().to_vec(),
+                            permissions: match &preimage {
+                                recovery::Node::File { permissions, .. } => permissions.clone(),
+                                _ => anyhow::bail!("restoration preimage must be a regular file"),
+                            },
+                        };
+                        ah_core::action::atomic_replace_file(target, original.as_bytes())?;
                     }
-                );
-                if !dry {
-                    std::fs::write(target, original)?;
+                }
+                _ => {
+                    let metadata = match std::fs::symlink_metadata(target) {
+                        Ok(metadata) => metadata,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            println!("Skipped missing managed target: {key}");
+                            return Ok(());
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
+                    if metadata.file_type().is_symlink() || !metadata.is_file() {
+                        println!("Skipped replaced managed target: {key}");
+                        retained.insert(key.clone(), entry.clone());
+                        return Ok(());
+                    }
+                    let verified = entry
+                        .installed_sha256
+                        .as_deref()
+                        .and_then(|expected| {
+                            std::fs::read(target)
+                                .ok()
+                                .map(|bytes| hex::encode(sha2::Sha256::digest(bytes)) == expected)
+                        })
+                        .unwrap_or(false);
+                    if !verified {
+                        println!("Skipped modified, missing or unverifiable: {key}");
+                        retained.insert(key.clone(), entry.clone());
+                    } else {
+                        println!("{}: {key}", if dry { "Would remove" } else { "Removing" });
+                        if !dry {
+                            mutation_count += 1;
+                            before_mutation(mutation_count, target)?;
+                            if !preimage.matches(target)? {
+                                anyhow::bail!("uninstall target changed before mutation; preserving user changes: {}", target.display());
+                            }
+                            std::fs::remove_file(target)?;
+                        }
+                    }
                 }
             }
-            _ => {
-                let verified = entry
-                    .installed_sha256
-                    .as_deref()
-                    .and_then(|expected| {
-                        std::fs::read(target)
-                            .ok()
-                            .map(|bytes| hex::encode(sha2::Sha256::digest(bytes)) == expected)
-                    })
-                    .unwrap_or(false);
-                if !verified {
-                    println!("Skipped modified, missing or unverifiable: {key}");
-                    retained.insert(key, entry);
-                } else {
-                    println!("{}: {key}", if dry { "Would remove" } else { "Removing" });
-                    if !dry {
-                        std::fs::remove_file(target)?;
+            Ok(())
+        })();
+        result?;
+        if !dry && !retained.contains_key(&key) {
+            let postimage = match read_postimage(target) {
+                Ok(postimage) => postimage,
+                Err(error) => {
+                    if let Err(restore) = preimage.restore(target, &expected_postimage) {
+                        anyhow::bail!("{error:#}; uninstall rollback failed: {restore:#}");
                     }
+                    return Err(error);
                 }
+            };
+            m.entries.remove(&key);
+            if let Err(error) = m.save_atomic(&p) {
+                if let Err(restore) = preimage.restore(target, &postimage) {
+                    anyhow::bail!("{error:#}; uninstall rollback failed: {restore:#}");
+                }
+                return Err(error);
             }
         }
     }
@@ -2454,6 +3423,594 @@ fn uninstall(r: Option<&Path>, dry: bool) -> Result<()> {
 mod tests {
     use super::utc_stamp;
     use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn uninstall_restoration_postimage_read_failure_rolls_back_current_entry() {
+        use super::*;
+        use sha2::Digest;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let cfg = root.join(".config/agent-home");
+        std::fs::create_dir_all(&cfg).unwrap();
+        let target = root.join("a");
+        let backup = cfg.join("a.bak");
+        std::fs::write(&target, b"installed").unwrap();
+        std::fs::write(&backup, b"original").unwrap();
+        let before = recovery::Node::read(&target).unwrap();
+        let mut manifest = ah_core::Manifest::default();
+        manifest.entries.insert(
+            target.display().to_string(),
+            ah_core::ManifestEntry {
+                kind: "merged-file".into(),
+                target: target.display().to_string(),
+                source: None,
+                backup: Some(backup.display().to_string()),
+                original_sha256: Some(hex::encode(sha2::Sha256::digest(b"original"))),
+                installed_sha256: Some(hex::encode(sha2::Sha256::digest(b"installed"))),
+            },
+        );
+        let mp = cfg.join("manifest.json");
+        manifest.save_atomic(&mp).unwrap();
+        let old_manifest = std::fs::read(&mp).unwrap();
+        let error = uninstall_with_postimage_reader(
+            Some(&root),
+            false,
+            |_, _| Ok(()),
+            |_| anyhow::bail!("injected uninstall postimage read failure"),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("injected uninstall postimage read failure"));
+        assert!(
+            before.matches(&target).unwrap(),
+            "failed restoration verification must not leave stale installed ownership"
+        );
+        assert_eq!(std::fs::read(&mp).unwrap(), old_manifest);
+        assert_eq!(std::fs::read(&backup).unwrap(), b"original");
+        uninstall(Some(&root), false).unwrap();
+        uninstall(Some(&root), false).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"original");
+    }
+
+    #[test]
+    fn local_postimage_read_failure_roundtrips_present_and_absent_configuration() {
+        use super::*;
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        for present in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("config.toml");
+            let preimage = if present {
+                std::fs::write(&path, b"schema = 1\n# original\n").unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+                Some((
+                    std::fs::read(&path).unwrap(),
+                    std::fs::metadata(&path).unwrap().permissions(),
+                ))
+            } else {
+                None
+            };
+            let before = recovery::Node::read(&path).unwrap();
+            let mut prepared = tempfile::NamedTempFile::new_in(temp.path()).unwrap();
+            prepared.write_all(b"schema = 1\n# committed\n").unwrap();
+            let mut postimage = None;
+            let error = persist_prepared_local(prepared, &path, &mut postimage, |_| {
+                anyhow::bail!("injected local postimage read failure")
+            })
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("injected local postimage read failure"));
+            let restore = restore_local_config(&path, preimage.as_ref(), postimage.as_ref());
+            assert!(
+                restore.is_ok(),
+                "own local persist must remain recoverable: {restore:?}"
+            );
+            assert!(
+                before.matches(&path).unwrap(),
+                "local configuration must roundtrip exactly"
+            );
+        }
+    }
+
+    #[test]
+    fn binary_postimage_read_failure_retains_rollback_ownership() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("vesica");
+        let candidate = temp.path().join("candidate");
+        std::fs::write(&target, b"old executable").unwrap();
+        std::fs::write(&candidate, b"new executable").unwrap();
+        let previous = recovery::Node::read(&target).unwrap();
+        let mut installed = None;
+        let error = replace_update_binary(&target, &candidate, &mut installed, |_| {
+            anyhow::bail!("injected binary postimage read failure")
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("injected binary postimage read failure"));
+        if let Some(expected) = installed.as_ref() {
+            previous.restore(&target, expected).unwrap();
+        }
+        assert!(
+            previous.matches(&target).unwrap(),
+            "failed postreplacement read must not lose binary rollback ownership"
+        );
+    }
+
+    #[test]
+    fn prune_checkpoint_failure_undoes_own_deletion_before_return() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let cfg = root.join(".config/agent-home");
+        std::fs::create_dir_all(&cfg).unwrap();
+        let target = root.join("stale-link");
+        std::os::unix::fs::symlink(temp.path(), &target).unwrap();
+        let mut manifest = ah_core::Manifest::default();
+        manifest.entries.insert(
+            target.display().to_string(),
+            ah_core::ManifestEntry {
+                kind: "symlink".into(),
+                target: target.display().to_string(),
+                source: Some(temp.path().display().to_string()),
+                backup: None,
+                original_sha256: None,
+                installed_sha256: None,
+            },
+        );
+        let mp = cfg.join("manifest.json");
+        manifest.save_atomic(&mp).unwrap();
+        let before = std::fs::read(&mp).unwrap();
+        let jp = temp.path().join("transaction.json");
+        let mut journal =
+            recovery::Journal::prepare(&jp, vec![target.clone(), mp.clone()]).unwrap();
+        journal.seal().unwrap();
+        let plan = ah_core::Planner::new().finish(false);
+        prune_stale_impl(&cfg, &plan, &root, false, Some(&mut journal), |_, _| {
+            std::fs::remove_file(&jp)?;
+            std::fs::create_dir(&jp)?; // deterministic journal persistence failure
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(
+            std::fs::read_link(&target).unwrap(),
+            temp.path(),
+            "own deletion must be reversed before returning failed checkpoint"
+        );
+        assert_eq!(std::fs::read(&mp).unwrap(), before);
+    }
+
+    #[test]
+    fn partial_stale_pruning_restores_owned_deletions() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let cfg = root.join(".config/agent-home");
+        std::fs::create_dir_all(&cfg).unwrap();
+        let mut manifest = ah_core::Manifest::default();
+        for name in ["a", "b"] {
+            let target = root.join(name);
+            std::os::unix::fs::symlink(temp.path(), &target).unwrap();
+            manifest.entries.insert(
+                target.display().to_string(),
+                ah_core::ManifestEntry {
+                    kind: "symlink".into(),
+                    target: target.display().to_string(),
+                    source: Some(temp.path().display().to_string()),
+                    backup: None,
+                    original_sha256: None,
+                    installed_sha256: None,
+                },
+            );
+        }
+        let mp = cfg.join("manifest.json");
+        manifest.save_atomic(&mp).unwrap();
+        let before = std::fs::read(&mp).unwrap();
+        let jp = temp.path().join("transaction.json");
+        let mut journal =
+            recovery::Journal::prepare(&jp, vec![root.join("a"), root.join("b"), mp.clone()])
+                .unwrap();
+        journal.seal().unwrap();
+        let plan = ah_core::Planner::new().finish(false);
+        let error = prune_stale_impl(&cfg, &plan, &root, false, Some(&mut journal), |i, _| {
+            if i == 2 {
+                anyhow::bail!("injected second prune failure");
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("injected second prune failure"));
+        recovery::Journal::rollback_file(&jp).unwrap();
+        for name in ["a", "b"] {
+            assert_eq!(std::fs::read_link(root.join(name)).unwrap(), temp.path());
+        }
+        assert_eq!(std::fs::read(&mp).unwrap(), before);
+    }
+
+    #[test]
+    fn first_seal_failure_restores_manifest_and_all_managed_nodes() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let shared = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/shared-home");
+        let options = || InstallOptions {
+            home_repo: Some(shared.clone()),
+            root: Some(home.clone()),
+            profile: Some(ProfileArg::Core),
+            dry_run: false,
+            repos_dir: None,
+            vault: None,
+        };
+        install(options()).unwrap();
+        let cfg = home.join(".config/agent-home");
+        let mp = cfg.join("manifest.json");
+        let mut old = ah_core::Manifest::load(&mp).unwrap();
+        old.profile = "lead".into(); // ensure the new commit differs from the preimage
+        old.save_atomic(&mp).unwrap();
+        let before = std::fs::read(&mp).unwrap();
+        let local_before = std::fs::read(cfg.join("config.toml")).unwrap();
+        let jp = temp.path().join("transaction.json");
+        let error = install_impl(options(), Some(&jp), || {
+            anyhow::bail!("injected first journal seal failure")
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("injected first journal seal failure"));
+        assert_eq!(
+            std::fs::read(&mp).unwrap(),
+            before,
+            "manifest committed before failed seal must roll back"
+        );
+        assert_eq!(
+            std::fs::read(cfg.join("config.toml")).unwrap(),
+            local_before
+        );
+        recovery::Journal::rollback_file(&jp).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_load_failure_restores_managed_state_and_retains_evidence() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let cfg = root.join(".config/agent-home");
+        std::fs::create_dir_all(&cfg).unwrap();
+        let mp = cfg.join("manifest.json");
+        ah_core::Manifest {
+            shared_home: temp.path().join("shared").display().to_string(),
+            ..Default::default()
+        }
+        .save_atomic(&mp)
+        .unwrap();
+        let target = root.join("managed.txt");
+        std::fs::write(&target, b"before").unwrap();
+        let script = temp.path().join("candidate");
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let options = UpdateOptions {
+            tag: Some("v9.9.9".into()),
+            channel: ChannelArg::Alpha,
+            target: Some(script.clone()),
+            root: Some(root),
+            dry_run: false,
+            repos_dir: None,
+        };
+        let mut retained = None;
+        let error = relink_with_checkpoint_loader(
+            &options,
+            &script,
+            |dir| {
+                let mut journal = recovery::Journal::prepare(
+                    &dir.join("transaction.json"),
+                    vec![target.clone()],
+                )?;
+                std::fs::write(&target, b"installed")?;
+                journal.seal()?;
+                retained = Some(dir.to_owned());
+                Ok(())
+            },
+            |dir| std::fs::remove_dir_all(dir),
+            |_| anyhow::bail!("injected checkpoint load failure"),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("injected checkpoint load failure"));
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"before",
+            "unreadable checkpoint must not silently commit migration"
+        );
+        assert!(
+            retained.unwrap().join("transaction.json").is_file(),
+            "reported recovery evidence must exist"
+        );
+    }
+
+    #[test]
+    fn partial_cleanup_without_journal_restores_managed_state_and_recreates_evidence() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let cfg = root.join(".config/agent-home");
+        std::fs::create_dir_all(&cfg).unwrap();
+        let mp = cfg.join("manifest.json");
+        ah_core::Manifest {
+            shared_home: temp.path().join("shared").display().to_string(),
+            ..Default::default()
+        }
+        .save_atomic(&mp)
+        .unwrap();
+        let target = root.join("managed.txt");
+        std::fs::write(&target, b"before").unwrap();
+        let script = temp.path().join("candidate");
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let options = UpdateOptions {
+            tag: Some("v9.9.9".into()),
+            channel: ChannelArg::Alpha,
+            target: Some(script.clone()),
+            root: Some(root),
+            dry_run: false,
+            repos_dir: None,
+        };
+        let mut retained = None;
+        let error = relink_with_cleanup(
+            &options,
+            &script,
+            |dir| {
+                let mut journal = recovery::Journal::prepare(
+                    &dir.join("transaction.json"),
+                    vec![target.clone()],
+                )?;
+                std::fs::write(&target, b"installed")?;
+                journal.seal()?;
+                retained = Some(dir.to_owned());
+                Ok(())
+            },
+            |dir| {
+                std::fs::remove_file(dir.join("transaction.json"))?;
+                Err(std::io::Error::other(
+                    "injected failure after journal unlink",
+                ))
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("injected failure after journal unlink"));
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"before",
+            "lost journal must not silently commit migration"
+        );
+        assert!(
+            retained.unwrap().join("transaction.json").is_file(),
+            "reported recovery evidence must exist"
+        );
+    }
+
+    #[test]
+    fn relink_cleanup_failure_restores_managed_preimage_and_retains_journal() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let cfg = root.join(".config/agent-home");
+        std::fs::create_dir_all(&cfg).unwrap();
+        let mp = cfg.join("manifest.json");
+        let manifest = ah_core::Manifest {
+            shared_home: temp.path().join("shared").display().to_string(),
+            ..Default::default()
+        };
+        manifest.save_atomic(&mp).unwrap();
+        let target = root.join("managed.txt");
+        std::fs::write(&target, b"before").unwrap();
+        let script = temp.path().join("candidate");
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let options = UpdateOptions {
+            tag: Some("v9.9.9".into()),
+            channel: ChannelArg::Alpha,
+            target: Some(script.clone()),
+            root: Some(root),
+            dry_run: false,
+            repos_dir: None,
+        };
+        let mut retained = None;
+        let error = relink_impl(&options, &script, |dir| {
+            let mut journal =
+                recovery::Journal::prepare(&dir.join("transaction.json"), vec![target.clone()])?;
+            std::fs::write(&target, b"installed")?;
+            journal.seal()?;
+            retained = Some(dir.to_owned());
+            anyhow::bail!("injected cleanup failure");
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("injected cleanup failure"));
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"before",
+            "cleanup failure must not commit managed migration"
+        );
+        assert!(retained.unwrap().join("transaction.json").is_file());
+    }
+
+    #[test]
+    fn uninstall_failure_position_matrix_retains_exact_pending_state_and_retries() {
+        use super::*;
+        use sha2::Digest;
+        for failure in [1, 2, 3] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().join("root");
+            let cfg = root.join(".config/agent-home");
+            std::fs::create_dir_all(&cfg).unwrap();
+            let mut manifest = ah_core::Manifest::default();
+            for name in ["a", "b", "c"] {
+                let target = root.join(name);
+                std::fs::write(&target, name).unwrap();
+                manifest.entries.insert(
+                    target.display().to_string(),
+                    ah_core::ManifestEntry {
+                        kind: "generated-file".into(),
+                        target: target.display().to_string(),
+                        source: None,
+                        backup: None,
+                        original_sha256: None,
+                        installed_sha256: Some(hex::encode(sha2::Sha256::digest(name.as_bytes()))),
+                    },
+                );
+            }
+            let mp = cfg.join("manifest.json");
+            manifest.save_atomic(&mp).unwrap();
+            uninstall_impl(Some(&root), false, |i, _| {
+                if i == failure {
+                    anyhow::bail!("injected read/write error");
+                }
+                Ok(())
+            })
+            .unwrap_err();
+            let state = ah_core::Manifest::load(&mp).unwrap();
+            assert_eq!(state.entries.len(), 4 - failure);
+            for (index, name) in ["a", "b", "c"].iter().enumerate() {
+                if index + 1 < failure {
+                    assert!(!root.join(name).exists());
+                } else {
+                    assert_eq!(std::fs::read(root.join(name)).unwrap(), name.as_bytes());
+                }
+            }
+            uninstall(Some(&root), false).unwrap();
+            uninstall(Some(&root), false).unwrap();
+            assert!(!mp.exists());
+        }
+    }
+
+    #[test]
+    fn uninstall_preserves_intervening_target_replacement_before_removal() {
+        use super::*;
+        use sha2::Digest;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let cfg = root.join(".config/agent-home");
+        std::fs::create_dir_all(&cfg).unwrap();
+        let target = root.join("a");
+        std::fs::write(&target, b"installed").unwrap();
+        let mut manifest = ah_core::Manifest::default();
+        manifest.entries.insert(
+            target.display().to_string(),
+            ah_core::ManifestEntry {
+                kind: "generated-file".into(),
+                target: target.display().to_string(),
+                source: None,
+                backup: None,
+                original_sha256: None,
+                installed_sha256: Some(hex::encode(sha2::Sha256::digest(b"installed"))),
+            },
+        );
+        let mp = cfg.join("manifest.json");
+        manifest.save_atomic(&mp).unwrap();
+        let original_manifest = std::fs::read(&mp).unwrap();
+        let result = uninstall_impl(Some(&root), false, |_, path| {
+            std::fs::write(path, b"intervening edit")?;
+            Ok(())
+        });
+        assert!(
+            result.is_err(),
+            "must refuse replacement at mutation boundary"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"intervening edit");
+        assert_eq!(std::fs::read(&mp).unwrap(), original_manifest);
+    }
+
+    #[test]
+    fn later_uninstall_mutation_failure_preserves_accurate_resumable_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let cfg = root.join(".config/agent-home");
+        std::fs::create_dir_all(&cfg).unwrap();
+        let mut manifest = ah_core::Manifest::default();
+        use sha2::Digest;
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            let path = root.join(name);
+            std::fs::write(&path, name).unwrap();
+            manifest.entries.insert(
+                path.display().to_string(),
+                ah_core::ManifestEntry {
+                    kind: "generated-file".into(),
+                    target: path.display().to_string(),
+                    source: None,
+                    backup: None,
+                    original_sha256: None,
+                    installed_sha256: Some(hex::encode(sha2::Sha256::digest(name.as_bytes()))),
+                },
+            );
+        }
+        let mp = cfg.join("manifest.json");
+        manifest.save_atomic(&mp).unwrap();
+        let error = super::uninstall_impl(Some(&root), false, |i, _| {
+            if i == 2 {
+                anyhow::bail!("injected second mutation failure");
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("injected second mutation failure"));
+        let remaining = ah_core::Manifest::load(&mp).unwrap();
+        assert_eq!(
+            remaining.entries.len(),
+            2,
+            "completed target must not retain stale ownership"
+        );
+        assert!(!remaining
+            .entries
+            .contains_key(root.join("a.txt").to_str().unwrap()));
+        assert!(!root.join("a.txt").exists());
+        assert_eq!(std::fs::read(root.join("b.txt")).unwrap(), b"b.txt");
+        super::uninstall(Some(&root), false).unwrap();
+        super::uninstall(Some(&root), false).unwrap();
+        assert!(!mp.exists());
+    }
+
+    #[test]
+    fn uninstall_later_progress_persistence_failure_restores_current_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let cfg = root.join(".config/agent-home");
+        std::fs::create_dir_all(&cfg).unwrap();
+        let mut manifest = ah_core::Manifest::default();
+        use sha2::Digest;
+        for name in ["a.txt", "b.txt"] {
+            let path = root.join(name);
+            std::fs::write(&path, name).unwrap();
+            manifest.entries.insert(
+                path.display().to_string(),
+                ah_core::ManifestEntry {
+                    kind: "generated-file".into(),
+                    target: path.display().to_string(),
+                    source: None,
+                    backup: None,
+                    original_sha256: None,
+                    installed_sha256: Some(hex::encode(sha2::Sha256::digest(name.as_bytes()))),
+                },
+            );
+        }
+        let mp = cfg.join("manifest.json");
+        manifest.save_atomic(&mp).unwrap();
+        let error = super::uninstall_impl(Some(&root), false, |i, _| {
+            if i == 2 {
+                std::fs::create_dir(cfg.join("manifest.json.tmp"))?;
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("manifest temp file"));
+        assert_eq!(
+            std::fs::read(root.join("b.txt")).unwrap(),
+            b"b.txt",
+            "failed progress commit must restore its mutation"
+        );
+        let remaining = ah_core::Manifest::load(&mp).unwrap();
+        assert_eq!(remaining.entries.len(), 1);
+        std::fs::remove_dir(cfg.join("manifest.json.tmp")).unwrap();
+        super::uninstall(Some(&root), false).unwrap();
+        assert!(!mp.exists());
+    }
 
     #[test]
     fn utc_stamp_formats_calendar_dates_and_nanoseconds() {

@@ -1,8 +1,6 @@
 # Vesica Troubleshooting
 
-Vesica is a prototype. It refuses rather than overwrites, so most problems show up as a clear
-refusal message and leave your files untouched. Find the message below, fix the cause, and
-rerun the same command; every command here is safe to repeat.
+Vesica is a prototype for disposable roots. Preflight refusals avoid managed mutations; later failures may leave accurate resumable state, retained owner edits or recovery journals. Read the complete diagnostic before retrying. Do not delete a retained journal/branch/backup blindly, and do not assume a nonzero exit means nothing changed.
 
 ## Bootstrap (`install.sh`)
 
@@ -94,14 +92,14 @@ Findings print `path:line:rule: message` and never the offending text.
 | Message | Fix |
 |---|---|
 | `Nothing was written. Re-run with --yes to apply` | Expected: `share` only plans without `--yes`. |
-| `… is outside the vault …` | `share` only promotes notes inside your vault (set `--root` if the vault is elsewhere). |
+| `… is outside the vault …` | `share` only promotes notes inside the selected personal vault (use `--vault`, `VESICA_VAULT`, or local config); `--root` selects machine state, not the vault. |
 | `… is missing a valid YAML frontmatter block` | Give the note `title, created, updated, type, area, tags` (see the vault contract). |
 | `link [[…]] would point outside the shared home` | The link would break inside the team repo. Fix it, or pass `--drop-unresolved-links` to keep just its text. |
 | `<shared>: has no Knowledge/<area>` | Create that area in the shared home first (it needs a `README.md`). |
 | `… already exists in the shared home` | The note is already there. Edit the shared copy, or pick another note. |
 | `… has uncommitted changes; commit or stash them before sharing` | Your shared-home checkout is dirty; Vesica won't mix your edits into the promotion commit. |
 | `branch share/<note> already exists` | A previous attempt left the branch. Delete it (`git branch -D share/<note>`) or finish the PR. |
-| `shared-home lint failed (…)` / `vault-scan found … credential pattern(s)` | The gate blocked the commit and the branch was rolled back. Fix the note, then rerun. |
+| `shared-home lint failed (…)` / `vault-scan found … credential pattern(s)` | The gate blocked the commit; inspect any additional rollback/conflict diagnostic before retrying. Complete rollback permits a safe retry; incomplete rollback can retain the promotion to keep links valid. |
 | `cannot read your Git identity; … or pass --owner` | Set `git config --global user.name`, or pass `--owner`. |
 
 ## `vesica sync-standards`
@@ -139,7 +137,7 @@ Beyond the blocker rows above:
 
 | Message | Meaning / fix |
 |---|---|
-| `Already up to date: vesica X (vY)` | The resolved tag is already installed. Nothing to do. |
+| `Already up to date: vesica X (vY)` | The resolved tag is already installed; manifest relink may still run. Dry-run reports pending relink without mutation. |
 | `no published release found for the stable channel` | Only pre-releases exist so far. Use `--channel alpha` (the default), or wait for a stable release. |
 | `checksum mismatch for …: refusing to replace the binary` | The download doesn't match `SHA256SUMS`. The installed binary is untouched. Retry; if it persists, don't work around it. |
 | `SHA256SUMS has no checksum for …` | The release is incomplete or was tampered with. Nothing was installed. |
@@ -147,6 +145,14 @@ Beyond the blocker rows above:
 | `download failed: …` | Network, or the tag/release doesn't exist. `GITHUB_TOKEN`/`GH_TOKEN` raises the API rate limit. |
 | `tag must look like vX.Y.Z or vX.Y.Z-pre.N` | Fix `--tag`. |
 | `No manifest recorded at …; skipping re-link` | The binary was replaced, but there's no install to re-link. Run `vesica install` if you expected one. |
+
+### Recovery and scan outcomes
+
+- `pending recovery at ... .vesica-relink-*`: no new migration starts. Preserve the journal and inspect its reported conflicting paths. Resolve owner edits explicitly or restore the recorded postimage before a retry; do not delete the evidence to bypass refusal.
+- `changed during operation; preserving user changes`: rollback refused to overwrite an intervening node/byte/mode replacement. Both the primary failure and retained recovery evidence matter.
+- `uninstall target changed before mutation`: the target was replaced after planning; the pending manifest records remain for a reviewed retry.
+- `cannot prepare local configuration ... Permission denied`: atomic persistence needs a writable real state parent, even if `config.toml` is readable. Preparation happens before unmanaged vault initialization.
+- `vault-scan` reports scanned text separately from excluded/unscanned assets; snapshot and share/lint gates also report asset exclusions to stderr before commit. Images/PDFs are not inspected for credentials; unsupported binary text, oversized text and read errors are not clean results. Diagnostics contain locations/rules, never matched tokens.
 
 ## `vesica vault`
 

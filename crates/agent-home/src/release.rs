@@ -184,12 +184,36 @@ pub fn check_reports_version(binary: &Path, tag: &str) -> Result<()> {
         .stdin(Stdio::null())
         .output()
         .with_context(|| format!("running {}", binary.display()))?;
-    let actual = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    if actual != expected {
-        anyhow::bail!("the released binary reports '{actual}', expected '{expected}'");
+    // Match bootstrap's exact identity contract: discard line terminators only, never
+    // whitespace or arbitrary invalid UTF-8 surrounding a plausible identity.
+    let actual = String::from_utf8_lossy(&out.stdout)
+        .trim_end_matches('\n')
+        .to_owned();
+    if !out.status.success() || actual != expected {
+        anyhow::bail!(
+            "the released binary reports '{actual}' (success={}), expected '{expected}' successfully",
+            out.status.success()
+        );
     }
     println!("Version check: {actual}");
     Ok(())
+}
+
+/// Whether `target` identifies itself as the given Vesica version.
+///
+/// A missing, non-executable or otherwise broken target is not considered up to date; callers
+/// should continue through the verified install path rather than skipping a needed repair.
+pub fn reports_version(target: &Path, version: &str) -> bool {
+    let Ok(out) = Command::new(target)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    out.status.success()
+        && String::from_utf8_lossy(&out.stdout).trim_end_matches('\n')
+            == format!("vesica {version}")
 }
 
 /// Replace `target` with `binary`, atomically (same directory, so `rename` is atomic).

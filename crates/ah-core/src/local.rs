@@ -113,13 +113,15 @@ impl LocalConfig {
         toml::to_string_pretty(self).map_err(Into::into)
     }
 
-    /// Persists the local file (and its directory). Returns the path written.
+    /// Persists local state through the same restrictive, atomic replacement primitive used by
+    /// managed configuration. Existing regular-file permissions are preserved; unexpected target
+    /// types are rejected.
     pub fn write(&self, config_dir: &Path) -> anyhow::Result<PathBuf> {
         fs::create_dir_all(config_dir)
             .with_context(|| format!("cannot create {}", config_dir.display()))?;
         let path = Self::path_in(config_dir);
-        fs::write(&path, self.to_toml()?)
-            .with_context(|| format!("cannot write {}", path.display()))?;
+        crate::action::atomic_replace_file(&path, self.to_toml()?.as_bytes())
+            .with_context(|| format!("cannot safely persist {}", path.display()))?;
         Ok(path)
     }
 }

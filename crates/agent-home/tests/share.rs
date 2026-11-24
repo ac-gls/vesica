@@ -89,9 +89,14 @@ impl Fixture {
             .arg("--home-repo")
             .arg(&self.shared)
             .arg("--root")
+            .arg(self._temp.path().join("machine"))
+            .arg("--vault")
             .arg(&self.vault)
             .args(extra)
             .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("AGENT_HOME_ROOT", self._temp.path().join("machine"))
+            .env("VESICA_VAULT", &self.vault)
             .env("GIT_AUTHOR_NAME", "Vesica Test")
             .env("GIT_AUTHOR_EMAIL", "vesica@example.invalid")
             .env("GIT_COMMITTER_NAME", "Vesica Test")
@@ -223,7 +228,7 @@ fn share_can_promote_into_decisions_and_rewrites_inbound_personal_links() {
     // Two personal notes pointing at the promoted note, one unrelated.
     fixture.note(
         "Inbox/pointer.md",
-        "See [[cache-decision]] and [[decisions/cache-decision|the decision]].\n",
+        "See [[cache-decision]] and [[Decisions/cache-decision|the decision]].\n",
     );
     fixture.note("Inbox/other.md", "See [[something-else]].\n");
 
@@ -308,7 +313,7 @@ fn share_refuses_a_link_that_would_not_resolve_inside_the_shared_home() {
     let fixture = Fixture::new();
     fixture.note(
         "Knowledge/Architecture/cache.md",
-        "---\ntitle: Cache strategy\ncreated: 2026-11-18\nupdated: 2026-11-18\ntype: note\narea: general\ntags: [architecture]\n---\nSee [[my private scratch note]] and [[Team/Standards/coding-standards]].\n",
+        "---\ntitle: Cache strategy\ncreated: 2026-11-18\nupdated: 2026-11-18\ntype: note\narea: general\ntags: [architecture]\n---\nSee [[my private scratch note]] and [[Standards/coding-standards]].\n",
     );
     let out = fixture
         .share(
@@ -335,10 +340,7 @@ fn share_refuses_a_link_that_would_not_resolve_inside_the_shared_home() {
             &["--area", "Architecture", "--yes", "--drop-unresolved-links"],
         )
         .success()
-        .stdout(predicate::str::contains("my private scratch note"))
-        .stdout(predicate::str::contains(
-            "link rewrite: [[Team/Standards/coding-standards]] -> [[Standards/coding-standards]]",
-        ));
+        .stdout(predicate::str::contains("my private scratch note"));
     let promoted =
         std::fs::read_to_string(fixture.shared.join("Knowledge/Architecture/cache.md")).unwrap();
     assert!(
@@ -430,8 +432,12 @@ fn share_refuses_a_note_outside_the_vault_and_a_taken_branch() {
         .arg("--home-repo")
         .arg(&fixture.shared)
         .arg("--root")
+        .arg(fixture._temp.path().join("machine"))
+        .arg("--vault")
         .arg(&fixture.vault)
         .args(["--area", "Architecture", "--yes"])
+        .env("AGENT_HOME_ROOT", fixture._temp.path().join("machine"))
+        .env("VESICA_VAULT", &fixture.vault)
         .assert()
         .failure()
         .stderr(predicate::str::contains("outside the vault"));
@@ -502,4 +508,332 @@ fn share_respects_the_area_flag_and_decisions_is_not_both() {
         .share("Knowledge/Architecture/cache.md", &["--yes"])
         .failure()
         .stderr(predicate::str::contains("exactly one of"));
+}
+
+impl Fixture {
+    fn share_with_vault_sources(
+        &self,
+        note: &str,
+        config_vault: Option<&Path>,
+        env_vault: Option<&Path>,
+        explicit_vault: Option<&Path>,
+    ) -> assert_cmd::assert::Assert {
+        let machine = self._temp.path().join("machine");
+        let config_dir = machine.join(".config/agent-home");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        if let Some(vault) = config_vault {
+            let text = format!("schema = 1\nvault = {:?}\n", vault.to_string_lossy());
+            std::fs::write(config_dir.join("config.toml"), text).unwrap();
+        }
+
+        let mut command = Command::cargo_bin("vesica").unwrap();
+        command
+            .arg("share")
+            .arg(self.vault.join(note))
+            .arg("--home-repo")
+            .arg(&self.shared)
+            .arg("--root")
+            .arg(&machine)
+            .args(["--area", "Architecture", "--yes"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("AGENT_HOME_ROOT", &machine)
+            .env_remove("VESICA_VAULT")
+            .env("GIT_AUTHOR_NAME", "Vesica Test")
+            .env("GIT_AUTHOR_EMAIL", "vesica@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Vesica Test")
+            .env("GIT_COMMITTER_EMAIL", "vesica@example.invalid");
+        if let Some(vault) = env_vault {
+            command.env("VESICA_VAULT", vault);
+        }
+        if let Some(vault) = explicit_vault {
+            command.arg("--vault").arg(vault);
+        }
+        command.assert()
+    }
+
+    fn assert_share_kept_personal_data(&self) {
+        assert!(self.vault.join("Knowledge/Architecture/cache.md").is_file());
+        assert_eq!(
+            std::fs::read_to_string(self.vault.join("Inbox/unrelated.md")).unwrap(),
+            "Do not change this unrelated personal note.\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(self._temp.path().join("machine/machine-only.txt")).unwrap(),
+            "Machine-root data stays separate.\n"
+        );
+        assert!(self
+            .shared
+            .join("Knowledge/Architecture/cache.md")
+            .is_file());
+    }
+}
+
+#[test]
+fn share_uses_the_personal_vault_from_machine_config() {
+    let fixture = Fixture::new();
+    fixture.valid_note("Knowledge/Architecture/cache.md");
+    fixture.note(
+        "Inbox/unrelated.md",
+        "Do not change this unrelated personal note.\n",
+    );
+    std::fs::create_dir_all(fixture._temp.path().join("machine")).unwrap();
+    std::fs::write(
+        fixture._temp.path().join("machine/machine-only.txt"),
+        "Machine-root data stays separate.\n",
+    )
+    .unwrap();
+
+    fixture
+        .share_with_vault_sources(
+            "Knowledge/Architecture/cache.md",
+            Some(&fixture.vault),
+            None,
+            None,
+        )
+        .success()
+        .stdout(predicate::str::contains("Committed"));
+    fixture.assert_share_kept_personal_data();
+}
+
+#[test]
+fn share_environment_vault_overrides_machine_config() {
+    let fixture = Fixture::new();
+    fixture.valid_note("Knowledge/Architecture/cache.md");
+    fixture.note(
+        "Inbox/unrelated.md",
+        "Do not change this unrelated personal note.\n",
+    );
+    std::fs::create_dir_all(fixture._temp.path().join("machine")).unwrap();
+    std::fs::write(
+        fixture._temp.path().join("machine/machine-only.txt"),
+        "Machine-root data stays separate.\n",
+    )
+    .unwrap();
+    let config_vault = fixture._temp.path().join("config-vault-decoy");
+    std::fs::create_dir_all(&config_vault).unwrap();
+
+    fixture
+        .share_with_vault_sources(
+            "Knowledge/Architecture/cache.md",
+            Some(&config_vault),
+            Some(&fixture.vault),
+            None,
+        )
+        .success()
+        .stdout(predicate::str::contains("Committed"));
+    fixture.assert_share_kept_personal_data();
+}
+
+#[test]
+fn share_explicit_vault_overrides_environment_and_machine_config() {
+    let fixture = Fixture::new();
+    fixture.valid_note("Knowledge/Architecture/cache.md");
+    fixture.note(
+        "Inbox/unrelated.md",
+        "Do not change this unrelated personal note.\n",
+    );
+    std::fs::create_dir_all(fixture._temp.path().join("machine")).unwrap();
+    std::fs::write(
+        fixture._temp.path().join("machine/machine-only.txt"),
+        "Machine-root data stays separate.\n",
+    )
+    .unwrap();
+    let config_vault = fixture._temp.path().join("config-vault-decoy");
+    let env_vault = fixture._temp.path().join("env-vault-decoy");
+    std::fs::create_dir_all(&config_vault).unwrap();
+    std::fs::create_dir_all(&env_vault).unwrap();
+
+    fixture
+        .share_with_vault_sources(
+            "Knowledge/Architecture/cache.md",
+            Some(&config_vault),
+            Some(&env_vault),
+            Some(&fixture.vault),
+        )
+        .success()
+        .stdout(predicate::str::contains("Committed"));
+    fixture.assert_share_kept_personal_data();
+}
+
+#[test]
+fn share_refuses_when_no_personal_vault_is_configured() {
+    let fixture = Fixture::new();
+    fixture.valid_note("Knowledge/Architecture/cache.md");
+    fixture.note(
+        "Inbox/unrelated.md",
+        "Do not change this unrelated personal note.\n",
+    );
+    std::fs::create_dir_all(fixture._temp.path().join("machine")).unwrap();
+    std::fs::write(
+        fixture._temp.path().join("machine/machine-only.txt"),
+        "Machine-root data stays separate.\n",
+    )
+    .unwrap();
+
+    let output = fixture
+        .share_with_vault_sources("Knowledge/Architecture/cache.md", None, None, None)
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("no personal vault configured"), "{stderr}");
+    assert!(!fixture
+        .shared
+        .join("Knowledge/Architecture/cache.md")
+        .exists());
+    fixture.assert_share_kept_personal_data_without_shared_note();
+}
+
+impl Fixture {
+    fn assert_share_kept_personal_data_without_shared_note(&self) {
+        assert!(self.vault.join("Knowledge/Architecture/cache.md").is_file());
+        assert_eq!(
+            std::fs::read_to_string(self.vault.join("Inbox/unrelated.md")).unwrap(),
+            "Do not change this unrelated personal note.\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(self._temp.path().join("machine/machine-only.txt")).unwrap(),
+            "Machine-root data stays separate.\n"
+        );
+        assert_eq!(
+            self.git(&self.shared, &["branch", "--show-current"]).trim(),
+            "main"
+        );
+    }
+}
+
+#[test]
+fn share_reports_exempt_assets_in_its_mutation_scan_gate() {
+    let f = Fixture::new();
+    let asset = f.shared.join("asset.png");
+    let bytes = b"\x00\xffexempt asset bytes";
+    std::fs::write(&asset, bytes).unwrap();
+    f.git(&f.shared, &["add", "asset.png"]);
+    f.git(&f.shared, &["commit", "-qm", "asset baseline"]);
+    let note = f.valid_note("Inbox/cache.md");
+    let before = std::fs::read(&note).unwrap();
+    f.share(
+        "Inbox/cache.md",
+        &["--area", "Architecture", "--owner", "Vesica Test", "--yes"],
+    )
+    .success()
+    .stderr(predicate::str::contains(format!(
+        "Excluded/unscanned asset: {}",
+        asset.display()
+    )))
+    .stderr(predicate::str::contains("not counted as clean"));
+    assert_eq!(std::fs::read(&asset).unwrap(), bytes);
+    assert_eq!(std::fs::read(&note).unwrap(), before);
+    assert_eq!(f.git(&f.shared, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn share_refuses_identity_redirect_before_mutation_unless_explicitly_dropped() {
+    fn snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, (String, Vec<u8>)> {
+        fn visit(
+            root: &Path,
+            dir: &Path,
+            out: &mut std::collections::BTreeMap<PathBuf, (String, Vec<u8>)>,
+        ) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                let meta = std::fs::symlink_metadata(&path).unwrap();
+                let bytes = if meta.is_file() {
+                    std::fs::read(&path).unwrap()
+                } else {
+                    Vec::new()
+                };
+                out.insert(
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    (
+                        format!("{:?} {:?}", meta.file_type(), meta.permissions()),
+                        bytes,
+                    ),
+                );
+                if meta.is_dir() {
+                    visit(root, &path, out);
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        visit(root, root, &mut out);
+        out
+    }
+    let fixture = Fixture::new();
+    let selected = fixture.shared.join("Guides/README.md");
+    let shadow = fixture
+        .shared
+        .join("Knowledge/Architecture/Guides/README.md");
+    let valid = b"---\ntitle: README target\ncreated: 2026-11-23\nupdated: 2026-11-23\ntype: readme\narea: team\ntags: [test]\nowner: test\nauthority: working\n---\nTarget.\n".to_vec();
+    for path in [&selected, &shadow] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, &valid).unwrap();
+    }
+    fixture.git(&fixture.shared, &["add", "-A"]);
+    fixture.git(
+        &fixture.shared,
+        &["commit", "-qm", "two README identity fixture"],
+    );
+    let source = fixture.valid_note("Guides.md");
+    let source_bytes = [
+        std::fs::read(&source).unwrap(),
+        b"[[Team/Guides#Heading|Chosen]]\n".to_vec(),
+    ]
+    .concat();
+    std::fs::write(&source, &source_bytes).unwrap();
+    let before = snapshot(fixture._temp.path());
+    for flags in [
+        vec!["--area", "Architecture"],
+        vec!["--area", "Architecture", "--yes"],
+    ] {
+        fixture
+            .share("Guides.md", &flags)
+            .failure()
+            .stderr(predicate::str::contains(
+                "cannot preserve selected shared target Guides/README.md",
+            ))
+            .stderr(predicate::str::contains("--drop-unresolved-links"));
+        assert_eq!(
+            snapshot(fixture._temp.path()),
+            before,
+            "refusal must precede all mutation"
+        );
+    }
+    fixture
+        .share(
+            "Guides.md",
+            &["--area", "Architecture", "--drop-unresolved-links"],
+        )
+        .success();
+    assert_eq!(
+        snapshot(fixture._temp.path()),
+        before,
+        "drop preview must be read-only"
+    );
+    let main = fixture.git(&fixture.shared, &["rev-parse", "main"]);
+    fixture
+        .share(
+            "Guides.md",
+            &["--area", "Architecture", "--yes", "--drop-unresolved-links"],
+        )
+        .success();
+    let emitted =
+        std::fs::read_to_string(fixture.shared.join("Knowledge/Architecture/Guides.md")).unwrap();
+    assert!(
+        emitted.ends_with("Guides\n"),
+        "explicit drop uses existing text-only policy: {emitted}"
+    );
+    assert!(!emitted.contains("[["));
+    assert_eq!(std::fs::read(&source).unwrap(), source_bytes);
+    assert_eq!(std::fs::read(&selected).unwrap(), valid);
+    assert_eq!(std::fs::read(&shadow).unwrap(), valid);
+    assert_eq!(fixture.git(&fixture.shared, &["rev-parse", "main"]), main);
+    assert_eq!(fixture.git(&fixture.shared, &["status", "--porcelain"]), "");
+    Command::cargo_bin("vesica")
+        .unwrap()
+        .args(["lint", "--home-repo"])
+        .arg(&fixture.shared)
+        .assert()
+        .success();
 }

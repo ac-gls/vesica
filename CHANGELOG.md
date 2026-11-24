@@ -4,6 +4,20 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+### Fixed
+- Local, unpublished safety remediation: exclusive atomic-file collision/failure coverage; original-mode/private-backup matrices; managed replacement ownership; absolute-root lifecycle and symlink-ancestor refusal; selected-vault and Git-selector isolation; share failure/retry preservation; personal writer containment; resumable uninstall checkpoints; configuration symlink refusal; and shared planner/lint parity.
+- Install prepares and syncs local-state persistence before unmanaged vault initialization, committing machine facts only after managed actions succeed. The non-root permission-denial regression now preserves the original vault inventory.
+- Update validates target type before execution, keeps equal-version dry-run nonmutating, invokes the verified new executable once, and guards binary plus installer-managed recovery across relink/acceptance/cleanup. Conflicts retain actionable recovery journals; this is not arbitrary crash recovery.
+- Bootstrap verifies successful staged identity before replacement; missing/non-executable/malformed/nonzero/wrong-version cases preserve the existing binary.
+- Personal inbound links resolve the first existing contained target, preserving reader-relative shadows and wrong-extension targets instead of redirecting same stems.
+- Updater recovery includes stale generated files, reverses its own deletion when prune checkpoint persistence fails, restores a committed manifest after first-seal failure, and retains an in-memory checkpoint through partial journal cleanup.
+- Supply-chain advisory RUSTSEC-2026-0592: upgrade dev-dependency transitive `url` from 2.5.8 to 2.5.9 (and `form_urlencoded` 1.2.3), without an advisory ignore. Cargo deny passes against the updated lockfile.
+
+### Changed
+- Role parsing uses maintained `yaml_serde 0.10.7` / `libyaml-rs 0.3.0` instead of the unmaintained `unsafe-libyaml` backend (RUSTSEC-2024-0449); Cargo audit with denied warnings passes without an ignore.
+- Scan reports, snapshot and share/lint mutation gates explicitly report excluded/unscanned binary assets separately from scanned text. Exempt assets are not evidence of clean content; unsupported/oversized/read-error text remains fail-closed.
+- Reconcile architecture, troubleshooting and security descriptions with recovery limitations, implemented harness wiring, explicit push behavior and native CI versus local evidence. Unpublished changes still require final combined checks and independent approval before real-home use.
+
 ## [0.1.0-alpha.4] - 2026-11-20
 
 Fourth pre-release, still a prototype for disposable trials on native Linux x86_64. It adds the

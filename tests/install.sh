@@ -23,6 +23,10 @@ mkdir -p "$HOME" "$TMP/release"
 cat > "$TMP/release/vesica" <<'STUB'
 #!/bin/sh
 set -eu
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "vesica ${VESICA_VERSION#v}"
+  exit 0
+fi
 if [ "${1:-}" = install ]; then
   shift
   printf '%s\n' install >>"$VESICA_CALLS"
@@ -58,9 +62,96 @@ grep -q 'only Linux hosts are supported' "$TMP/out" || fail "non-Linux rejection
 
 # Native Linux bootstrap does not depend on the historical WSL-only override.
 unset VESICA_ALLOW_NON_WSL || true
-sh "$INSTALLER" --from-file "$TMP/release/vesica-${VESICA_VERSION}-x86_64-linux.tar.gz" --bootstrap-only
+sh "$INSTALLER" --from-file "$TMP/release/vesica-${VESICA_VERSION}-x86_64-linux.tar.gz" --bootstrap-only >"$TMP/success-out" 2>&1
 [[ -x "$VESICA_BIN_DIR/vesica" ]] || fail "binary was not installed"
+VERIFIED_IDENTITY=$("$VESICA_BIN_DIR/vesica" --version)
+assert_eq "$(<"$TMP/success-out")" "$VERIFIED_IDENTITY installed to $VESICA_BIN_DIR/vesica" "success message must use the verified executable identity"
 [[ ! -e "$VESICA_CALLS" ]] || fail "bootstrap-only unexpectedly invoked install"
+
+# A valid checksum does not establish the binary's identity: the executable must report the
+# pinned bootstrap version before it is installed.
+mkdir -p "$TMP/mismatch-release" "$TMP/mismatch-bin"
+printf 'user-owned binary bytes\\000\\377\\n' > "$TMP/mismatch-bin/vesica"
+MISMATCH_TARGET_BEFORE=$(sha256sum "$TMP/mismatch-bin/vesica")
+cat > "$TMP/mismatch-release/vesica" <<'STUB'
+#!/bin/sh
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "vesica 9.9.9"
+  exit 0
+fi
+STUB
+chmod +x "$TMP/mismatch-release/vesica"
+tar --mtime='@0' --owner=0 --group=0 --numeric-owner -C "$TMP/mismatch-release" -czf "$TMP/mismatch-release/vesica-${VESICA_VERSION}-x86_64-linux.tar.gz" vesica
+(
+  cd "$TMP/mismatch-release"
+  sha256sum "vesica-${VESICA_VERSION}-x86_64-linux.tar.gz" > SHA256SUMS
+)
+if VESICA_BIN_DIR="$TMP/mismatch-bin" sh "$INSTALLER" --from-file "$TMP/mismatch-release/vesica-${VESICA_VERSION}-x86_64-linux.tar.gz" --bootstrap-only >"$TMP/out" 2>&1; then
+  fail "bootstrap accepted a binary whose reported version did not match VESICA_VERSION"
+fi
+grep -q 'version mismatch' "$TMP/out" || fail "bootstrap version identity failure was not reported"
+assert_eq "$(sha256sum "$TMP/mismatch-bin/vesica")" "$MISMATCH_TARGET_BEFORE" "failed version check changed the pre-existing binary"
+
+# A staged executable that reports the expected identity but exits unsuccessfully must not
+# be trusted, and rejection must happen before replacing an existing target.
+mkdir -p "$TMP/nonzero-release" "$TMP/nonzero-bin"
+printf 'pre-existing binary bytes\\000\\377\\n' > "$TMP/nonzero-bin/vesica"
+NONZERO_TARGET_BEFORE=$(sha256sum "$TMP/nonzero-bin/vesica")
+cat > "$TMP/nonzero-release/vesica" <<'STUB'
+#!/bin/sh
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "vesica ${VESICA_VERSION#v}"
+  exit 23
+fi
+STUB
+chmod +x "$TMP/nonzero-release/vesica"
+tar --mtime='@0' --owner=0 --group=0 --numeric-owner -C "$TMP/nonzero-release" -czf "$TMP/nonzero-release/vesica-${VESICA_VERSION}-x86_64-linux.tar.gz" vesica
+(
+  cd "$TMP/nonzero-release"
+  sha256sum "vesica-${VESICA_VERSION}-x86_64-linux.tar.gz" > SHA256SUMS
+)
+if VESICA_BIN_DIR="$TMP/nonzero-bin" sh "$INSTALLER" --from-file "$TMP/nonzero-release/vesica-${VESICA_VERSION}-x86_64-linux.tar.gz" --bootstrap-only >"$TMP/out" 2>&1; then
+  fail "bootstrap accepted a version-matching executable whose --version exited nonzero"
+fi
+grep -q 'version probe failed' "$TMP/out" || fail "nonzero version-probe failure was not reported"
+assert_eq "$(sha256sum "$TMP/nonzero-bin/vesica")" "$NONZERO_TARGET_BEFORE" "failed version probe changed the pre-existing binary"
+
+# Checksum-valid rejection matrix. Every case starts with an existing binary, checks exact
+# bytes via cmp (including NUL/non-UTF8), and proves that install was never invoked.
+identity_rejection() {
+  local name=$1 expected=$2 body=$3 mode=$4
+  local release="$TMP/$name-release" bin="$TMP/$name-bin"
+  mkdir -p "$release" "$bin"
+  printf 'existing executable\000\377\r\nno-final-newline' > "$bin/vesica"
+  cp "$bin/vesica" "$TMP/$name-preimage"
+  if [[ "$name" == missing ]]; then
+    printf 'release metadata\n' > "$release/metadata"
+    tar -C "$release" -czf "$release/vesica-${VESICA_VERSION}-x86_64-linux.tar.gz" metadata
+  else
+    printf '%s' "$body" > "$release/vesica"
+    chmod "$mode" "$release/vesica"
+    tar -C "$release" -czf "$release/vesica-${VESICA_VERSION}-x86_64-linux.tar.gz" vesica
+  fi
+  (cd "$release" && sha256sum "vesica-${VESICA_VERSION}-x86_64-linux.tar.gz" > SHA256SUMS)
+  rm -f "$VESICA_CALLS"
+  if VESICA_BIN_DIR="$bin" sh "$INSTALLER" --from-file "$release/vesica-${VESICA_VERSION}-x86_64-linux.tar.gz" --bootstrap-only >"$TMP/$name-out" 2>&1; then
+    fail "checksum-valid $name artifact was accepted"
+  fi
+  grep -q "$expected" "$TMP/$name-out" || fail "$name rejection did not report $expected"
+  cmp -s "$bin/vesica" "$TMP/$name-preimage" || fail "$name validation changed existing bytes"
+  [[ ! -e "$VESICA_CALLS" ]] || fail "$name rejection invoked install"
+  shopt -s dotglob nullglob
+  local entries=("$bin"/*)
+  shopt -u dotglob nullglob
+  assert_eq "${#entries[@]}" 1 "$name rejection left target-side artifacts"
+  [[ "${entries[0]}" == "$bin/vesica" ]] || fail "$name rejection changed target layout"
+  printf 'PASS: bootstrap rejects %s and preserves existing bytes\n' "$name"
+}
+identity_rejection missing 'does not contain vesica' '' 0755
+identity_rejection non-executable 'version probe failed' $'#!/bin/sh\nprintf "vesica %s\\n" "${VESICA_VERSION#v}"\n' 0644
+identity_rejection failed-command 'version probe failed' $'#!/does/not/exist\n' 0755
+identity_rejection malformed 'version mismatch' $'#!/bin/sh\nprintf "vesica %s\\nextra output\\n" "${VESICA_VERSION#v}"\n' 0755
+identity_rejection empty-output 'version mismatch' $'#!/bin/sh\nexit 0\n' 0755
 
 # Normal invocation forwards install arguments without word splitting.
 rm -f "$VESICA_BIN_DIR/vesica"
@@ -84,4 +175,4 @@ if sh "$INSTALLER" --from-file "$TMP/release/vesica-${VESICA_VERSION}-x86_64-lin
 fi
 [[ ! -e "$VESICA_BIN_DIR/vesica" ]] || fail "binary left behind after missing checksum entry"
 
-printf 'installer tests passed (Linux platform check, bootstrap-only, argument forwarding, checksum rejection)\n'
+printf 'installer tests passed (platform, verified identity success, missing/nonexec/failed/malformed/nonzero/wrong identity preservation, forwarding, checksum rejection)\n'

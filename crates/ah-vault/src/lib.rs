@@ -4,11 +4,11 @@ pub mod personal;
 pub(crate) mod rollback;
 pub mod share;
 
-pub(crate) mod git;
+pub mod git;
 
 use anyhow::Context;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// Read-only view of a shared-home Git checkout. Remote refs are never refreshed here.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +76,8 @@ pub fn shared_home_status(path: &Path) -> anyhow::Result<SharedHomeStatus> {
 /// Local changes and divergent histories are preserved and reported, never merged.
 pub fn pull_shared_home(path: &Path) -> anyhow::Result<PullResult> {
     let root = checkout_root(path)?;
+    // Pull bypasses the checked Git runner below; validate storage before even fetching.
+    crate::git::validate_mutation_repository(&root)?;
     let initial = shared_home_status(&root)?;
     if !initial.clean {
         anyhow::bail!(
@@ -98,23 +100,20 @@ pub fn pull_shared_home(path: &Path) -> anyhow::Result<PullResult> {
     let old_head = git_output(&root, &["rev-parse", "HEAD"])?;
     let old_remote_ref = git_output_optional(&root, &["rev-parse", "--verify", &remote_ref])?;
     if let Some(old_remote_ref) = old_remote_ref.as_deref() {
-        let remote_relation = Command::new("git")
-            .arg("-C")
-            .arg(&root)
-            .args([
+        let remote_relation = crate::git::command(
+            &root,
+            &[
                 "merge-base",
                 "--is-ancestor",
                 old_remote_ref,
                 old_head.as_str(),
-            ])
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .context("starting git merge-base")?;
+            ],
+            true,
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("starting git merge-base")?;
         if !remote_relation.success() {
             anyhow::bail!(
                 "local branch has diverged from or rewound its recorded upstream; refusing pull"
@@ -125,23 +124,20 @@ pub fn pull_shared_home(path: &Path) -> anyhow::Result<PullResult> {
     let fetched_ref = git_output(&root, &["rev-parse", "--verify", &remote_ref])?;
     if let Some(old_remote_ref) = old_remote_ref.as_deref() {
         if old_remote_ref != fetched_ref {
-            let remote_advance = Command::new("git")
-                .arg("-C")
-                .arg(&root)
-                .args([
+            let remote_advance = crate::git::command(
+                &root,
+                &[
                     "merge-base",
                     "--is-ancestor",
                     old_remote_ref,
                     fetched_ref.as_str(),
-                ])
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_TERMINAL_PROMPT", "0")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .context("starting git merge-base")?;
+                ],
+                true,
+            )
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("starting git merge-base")?;
             if !remote_advance.success() {
                 anyhow::bail!("shared-home upstream was rewound or diverged; refusing pull");
             }
@@ -172,20 +168,19 @@ pub fn pull_shared_home(path: &Path) -> anyhow::Result<PullResult> {
         anyhow::bail!("shared-home upstream changed while fetching; refusing to pull");
     }
     if old_remote_ref.is_some() {
-        let ancestry = Command::new("git")
-            .arg("-C")
-            .arg(&root)
-            .args(["merge-base", "--is-ancestor", "HEAD", remote_ref.as_str()])
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .context("starting git merge-base")?;
+        let ancestry = crate::git::command(
+            &root,
+            &["merge-base", "--is-ancestor", "HEAD", remote_ref.as_str()],
+            true,
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("starting git merge-base")?;
         if !ancestry.success() {
-            anyhow::bail!("shared-home history is divergent or cannot be verified; refusing non-fast-forward pull");
+            anyhow::bail!(
+                "shared-home history is divergent or cannot be verified; refusing non-fast-forward pull"
+            );
         }
     }
     let still_clean = git_output(
@@ -225,14 +220,7 @@ fn checkout_root(path: &Path) -> anyhow::Result<PathBuf> {
 }
 
 fn git_output(path: &Path, args: &[&str]) -> anyhow::Result<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(args)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
+    let output = crate::git::command(path, args, true)
         .output()
         .with_context(|| {
             format!(
@@ -256,14 +244,7 @@ fn git_output(path: &Path, args: &[&str]) -> anyhow::Result<String> {
 }
 
 fn git_output_optional(path: &Path, args: &[&str]) -> anyhow::Result<Option<String>> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(args)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
+    let output = crate::git::command(path, args, true)
         .output()
         .with_context(|| {
             format!(
@@ -449,12 +430,14 @@ pub struct LintFinding {
 
 /// Check shared-home structure and Markdown links without including document text.
 pub fn lint_shared_home(root: &std::path::Path) -> anyhow::Result<Vec<LintFinding>> {
-    use std::collections::BTreeSet;
     use walkdir::WalkDir;
 
     if !root.is_dir() {
         anyhow::bail!("shared-home root is not a directory");
     }
+    // Link containment compares canonical candidates, so normalize the selected root too.
+    let canonical_root = root.canonicalize()?;
+    let root = canonical_root.as_path();
     let mut findings = Vec::new();
     let mut files = Vec::new();
     let mut directories = Vec::new();
@@ -480,20 +463,6 @@ pub fn lint_shared_home(root: &std::path::Path) -> anyhow::Result<Vec<LintFindin
             ));
         }
     }
-    let mut all_paths: BTreeSet<String> = files
-        .iter()
-        .map(|(p, _, _)| p.to_string_lossy().replace('\\', "/"))
-        .collect();
-    all_paths.extend(
-        directories
-            .iter()
-            .map(|p| p.to_string_lossy().replace('\\', "/")),
-    );
-    let markdown: BTreeSet<String> = files
-        .iter()
-        .filter(|(p, _, _)| p.extension().is_some_and(|e| e == "md"))
-        .map(|(p, _, _)| p.to_string_lossy().replace('\\', "/"))
-        .collect();
     for directory in &directories {
         let mut components = directory.components();
         let area = components
@@ -605,33 +574,8 @@ pub fn lint_shared_home(root: &std::path::Path) -> anyhow::Result<Vec<LintFindin
                     .unwrap_or("")
                     .trim();
                 if !target.is_empty() {
-                    let resolved = if std::path::Path::new(target).extension().is_some() {
-                        target.to_owned()
-                    } else {
-                        format!("{target}.md")
-                    };
-                    let candidate = relative
-                        .parent()
-                        .unwrap_or_else(|| std::path::Path::new(""))
-                        .join(&resolved)
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    let rooted = resolved.replace('\\', "/");
-                    let alias = candidate
-                        .strip_suffix("/README.md")
-                        .or_else(|| candidate.strip_suffix(".md"))
-                        .unwrap_or(&candidate);
-                    let rooted_alias = rooted
-                        .strip_suffix("/README.md")
-                        .or_else(|| rooted.strip_suffix(".md"))
-                        .unwrap_or(&rooted);
-                    if !markdown.contains(&candidate)
-                        && !markdown.contains(&rooted)
-                        && !all_paths.contains(&candidate)
-                        && !all_paths.contains(&rooted)
-                        && !all_paths.contains(alias)
-                        && !all_paths.contains(rooted_alias)
-                    {
+                    let resolves = share::resolve_shared_target(root, relative, target).is_some();
+                    if !resolves {
                         findings.push(LintFinding {
                             path: relative.clone(),
                             line: line_no,
@@ -977,44 +921,163 @@ fn secret_patterns() -> &'static [regex::Regex] {
     })
 }
 
-/// 1-based line numbers of a bounded-size UTF-8 file that match a secret pattern.
-pub(crate) fn scan_file(path: &std::path::Path) -> anyhow::Result<Vec<usize>> {
-    if std::fs::metadata(path)?.len() > 2_000_000 {
-        return Ok(Vec::new());
-    }
-    let bytes = std::fs::read(path)?;
-    let Ok(text) = std::str::from_utf8(&bytes) else {
-        return Ok(Vec::new());
+/// Result of scanning one candidate without conflating clean and unscanned files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScanOutcome {
+    ScannedClean,
+    Findings(Vec<usize>),
+    UnsupportedOrBinary,
+    ExcludedAsset,
+    Oversized,
+    Error(std::io::ErrorKind),
+}
+
+const MAX_SCAN_BYTES: u64 = 2_000_000;
+
+/// Scan one bounded candidate while preserving distinct outcomes for mutation gates.
+fn scan_file_outcome(path: &std::path::Path) -> ScanOutcome {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) => return ScanOutcome::Error(error.kind()),
     };
-    Ok(text
+    if metadata.len() > MAX_SCAN_BYTES {
+        return ScanOutcome::Oversized;
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) => return ScanOutcome::Error(error.kind()),
+    };
+    // Binary assets are an explicit exemption, not a scanned-clean result. This bounded
+    // heuristic does not inspect images/PDFs; LFS policy is independently enforced by lint.
+    let unsupported = bytes.contains(&0) || std::str::from_utf8(&bytes).is_err();
+    if unsupported {
+        let asset = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| {
+                ["png", "jpg", "jpeg", "gif", "webp", "pdf"]
+                    .contains(&ext.to_ascii_lowercase().as_str())
+            });
+        return if asset {
+            ScanOutcome::ExcludedAsset
+        } else {
+            ScanOutcome::UnsupportedOrBinary
+        };
+    }
+    let text = std::str::from_utf8(&bytes).expect("UTF-8 checked above");
+    let findings: Vec<_> = text
         .lines()
         .enumerate()
-        .filter(|(_, line)| secret_patterns().iter().any(|p| p.is_match(line)))
+        .filter(|(_, line)| {
+            secret_patterns()
+                .iter()
+                .any(|pattern| pattern.is_match(line))
+        })
         .map(|(index, _)| index + 1)
-        .collect())
+        .collect();
+    if findings.is_empty() {
+        ScanOutcome::ScannedClean
+    } else {
+        ScanOutcome::Findings(findings)
+    }
+}
+
+/// 1-based line numbers of bounded UTF-8 files matching a secret pattern.
+/// Oversized and unreadable candidates are errors so mutation gates fail closed.
+pub(crate) fn scan_file(path: &std::path::Path) -> anyhow::Result<Vec<usize>> {
+    match scan_file_outcome(path) {
+        ScanOutcome::ScannedClean => Ok(Vec::new()),
+        ScanOutcome::ExcludedAsset => {
+            report_excluded_asset(path);
+            Ok(Vec::new())
+        }
+        ScanOutcome::UnsupportedOrBinary => anyhow::bail!(
+            "{} is unsupported/binary; refusing unscanned candidate (only image/PDF assets are exempt)",
+            path.display()
+        ),
+        ScanOutcome::Findings(lines) => Ok(lines),
+        ScanOutcome::Oversized => anyhow::bail!(
+            "{} exceeds the {}-byte secret scan limit; refusing unscanned candidate",
+            path.display(),
+            MAX_SCAN_BYTES
+        ),
+        ScanOutcome::Error(kind) => {
+            anyhow::bail!("cannot scan {} ({kind:?})", path.display())
+        }
+    }
+}
+
+pub struct ScanReport {
+    pub findings: Vec<SecretFinding>,
+    pub scanned_files: usize,
+    pub excluded_assets: Vec<std::path::PathBuf>,
 }
 
 pub fn scan_secrets(root: &std::path::Path) -> anyhow::Result<Vec<SecretFinding>> {
+    let report = scan_report(root)?;
+    for asset in &report.excluded_assets {
+        report_excluded_asset(asset);
+    }
+    Ok(report.findings)
+}
+
+fn report_excluded_asset(path: &std::path::Path) {
+    eprintln!(
+        "Excluded/unscanned asset: {} (image/PDF exemption; not counted as clean)",
+        path.display()
+    );
+}
+
+pub fn scan_report(root: &std::path::Path) -> anyhow::Result<ScanReport> {
     use walkdir::WalkDir;
-    let mut found = Vec::new();
-    for entry in WalkDir::new(root).follow_links(false) {
+    let mut report = ScanReport {
+        findings: Vec::new(),
+        scanned_files: 0,
+        excluded_assets: Vec::new(),
+    };
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| !(entry.depth() == 1 && entry.file_name() == ".git"))
+    {
         let entry = entry?;
         if entry.file_type().is_symlink() || !entry.file_type().is_file() {
             continue;
         }
-        for line in scan_file(entry.path())? {
-            found.push(SecretFinding {
-                path: entry.path().to_path_buf(),
-                line,
-            });
+        match scan_file_outcome(entry.path()) {
+            ScanOutcome::ScannedClean => report.scanned_files += 1,
+            ScanOutcome::ExcludedAsset => report.excluded_assets.push(entry.path().to_owned()),
+            ScanOutcome::UnsupportedOrBinary => anyhow::bail!(
+                "{} is unsupported/binary; refusing unscanned candidate (only image/PDF assets are exempt)",
+                entry.path().display()
+            ),
+            ScanOutcome::Findings(lines) => {
+                report.scanned_files += 1;
+                for line in lines {
+                    report.findings.push(SecretFinding {
+                        path: entry.path().to_path_buf(),
+                        line,
+                    });
+                }
+            }
+            ScanOutcome::Oversized => anyhow::bail!(
+                "{} exceeds the {}-byte secret scan limit; refusing unscanned candidate",
+                entry.path().display(),
+                MAX_SCAN_BYTES
+            ),
+            ScanOutcome::Error(kind) => {
+                anyhow::bail!("cannot scan {} ({kind:?})", entry.path().display())
+            }
         }
     }
-    Ok(found)
+    report.excluded_assets.sort();
+    Ok(report)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     #[test]
     fn lfs_rules_agree_with_git_check_attr() {
@@ -1083,6 +1146,147 @@ other/*.svg filter=custom\n";
         // Guard against a vacuous pass: Git itself reports exactly these 11 paths as LFS
         // (legacy/sub/old.svg is not matched by `legacy/*.svg !filter`, so `*.svg` applies).
         assert_eq!(paths.iter().filter(|p| rules.tracks(p)).count(), 11);
+    }
+
+    #[test]
+    fn scanner_asset_exemption_and_end_of_bounded_text_are_explicit() {
+        let root = tempfile::tempdir().unwrap();
+        for extension in ["png", "jpg", "jpeg", "gif", "webp", "pdf"] {
+            let path = root.path().join(format!("asset.{extension}"));
+            std::fs::write(&path, [0xff, 0x00]).unwrap();
+            assert_eq!(scan_file_outcome(&path), ScanOutcome::ExcludedAsset);
+            assert!(scan_file(&path).unwrap().is_empty());
+        }
+        let marker = format!("ghp_{}", "A".repeat(36));
+        let path = root.path().join("end.md");
+        let mut bytes = vec![b' '; MAX_SCAN_BYTES as usize - marker.len()];
+        bytes.extend(marker.as_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(scan_file_outcome(&path), ScanOutcome::Findings(vec![1]));
+        let path = root.path().join("nul.md");
+        std::fs::write(&path, [b'a', 0]).unwrap();
+        assert_eq!(scan_file_outcome(&path), ScanOutcome::UnsupportedOrBinary);
+        assert!(scan_file(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("unscanned"));
+    }
+
+    #[test]
+    fn snapshot_binary_candidate_is_explicitly_unscanned_and_not_committed() {
+        let root = tempfile::tempdir().unwrap();
+        personal::init(root.path(), "2026-11-23", false).unwrap();
+        for args in [
+            ["config", "user.name", "Test"],
+            ["config", "user.email", "test@example.invalid"],
+        ] {
+            git_output(root.path(), &args).unwrap();
+        }
+        personal::snapshot(root.path(), "baseline").unwrap();
+        let head = git_output(root.path(), &["rev-parse", "HEAD"]).unwrap();
+        std::fs::write(root.path().join("unsupported.md"), [0xff, 0xfe]).unwrap();
+        let error = personal::snapshot(root.path(), "unsafe")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("unscanned") && error.contains("unsupported.md"),
+            "{error}"
+        );
+        assert_eq!(
+            git_output(root.path(), &["rev-parse", "HEAD"]).unwrap(),
+            head
+        );
+        assert!(scan_secrets(root.path()).is_err());
+    }
+
+    #[test]
+    fn scanner_distinguishes_clean_unsupported_and_error_candidates() {
+        let root = tempfile::tempdir().unwrap();
+        let clean = root.path().join("clean.md");
+        let binary = root.path().join("binary.bin");
+        std::fs::write(&clean, "ordinary harmless text\n").unwrap();
+        std::fs::write(&binary, [0xff, 0xfe, 0x00]).unwrap();
+
+        assert_eq!(scan_file_outcome(&clean), ScanOutcome::ScannedClean);
+        assert_eq!(scan_file_outcome(&binary), ScanOutcome::UnsupportedOrBinary);
+        assert_eq!(
+            scan_file_outcome(&root.path().join("missing.md")),
+            ScanOutcome::Error(std::io::ErrorKind::NotFound)
+        );
+    }
+
+    #[test]
+    fn scanner_classifies_size_boundary_without_echoing_candidate_content() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = format!("ghp_{}", "A".repeat(36));
+        for size in [1_999_999, 2_000_000, 2_000_001] {
+            let candidate = root.path().join(format!("boundary-{size}.md"));
+            let mut bytes = marker.as_bytes().to_vec();
+            bytes.resize(size, b' ');
+            std::fs::write(&candidate, bytes).unwrap();
+
+            let outcome = scan_file_outcome(&candidate);
+            if size <= MAX_SCAN_BYTES as usize {
+                assert_eq!(outcome, ScanOutcome::Findings(vec![1]), "size={size}");
+            } else {
+                assert_eq!(outcome, ScanOutcome::Oversized);
+                let diagnostic = scan_file(&candidate).unwrap_err().to_string();
+                assert!(diagnostic.contains(&candidate.display().to_string()));
+                assert!(!diagnostic.contains(&marker));
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_refuses_oversized_candidate_without_disclosing_contents() {
+        let root = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(root.path())
+                .args(args)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "Vesica Test"]);
+        git(&["config", "user.email", "vesica@example.invalid"]);
+        std::fs::write(root.path().join(".gitignore"), "/Team\n").unwrap();
+        git(&["add", ".gitignore"]);
+        git(&["commit", "-q", "-m", "initial"]);
+        let old_head = git_output(root.path(), &["rev-parse", "HEAD"]).unwrap();
+        let note = root.path().join("large.md");
+        let marker = format!("ghp_{}", "A".repeat(36));
+        let mut bytes = marker.clone().into_bytes();
+        bytes.resize(2_000_001, b' ');
+        std::fs::write(&note, bytes).unwrap();
+
+        let result = personal::snapshot(root.path(), "snapshot");
+
+        let diagnostic = result
+            .as_ref()
+            .expect_err("snapshot must refuse an oversized unscanned candidate")
+            .to_string();
+        assert!(
+            diagnostic.contains("large.md"),
+            "unexpected diagnostic: {diagnostic}"
+        );
+        assert!(!diagnostic.contains(&marker));
+        assert_eq!(
+            git_output(root.path(), &["rev-parse", "HEAD"]).unwrap(),
+            old_head
+        );
+        assert_eq!(
+            git_output(root.path(), &["status", "--porcelain"]).unwrap(),
+            "?? large.md"
+        );
     }
 
     #[test]
