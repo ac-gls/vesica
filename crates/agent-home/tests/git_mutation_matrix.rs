@@ -853,3 +853,66 @@ fn team_pull_refuses_linked_worktree_before_fetch_or_mutation() {
         "remote mutated before refusal"
     );
 }
+
+#[test]
+fn cli_share_excludes_independent_nested_repository_and_refuses_its_source() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.vault.join("note.md"), NOTE).unwrap();
+    std::fs::write(fixture.vault.join("pointer.md"), "See [[note]].\n").unwrap();
+    let nested = fixture.vault.join("unrelated-repo");
+    std::fs::create_dir(&nested).unwrap();
+    std::fs::write(nested.join("reader.md"), "Nested [[note]].\r\n").unwrap();
+    std::fs::write(nested.join("private.md"), NOTE).unwrap();
+    git(&nested, &["init", "-q", "-b", "main"]);
+    git(&nested, &["add", "."]);
+    git(&nested, &["commit", "-qm", "unrelated baseline"]);
+    let before = tree(&nested);
+    let shared_before = tree(&fixture.shared);
+    let output = fixture
+        .selected_share(
+            VaultSelection::Explicit,
+            &fixture.vault.join("note.md"),
+            false,
+        )
+        .output()
+        .unwrap();
+    let stdout = success(&output);
+    assert!(
+        !stdout.contains("unrelated-repo/reader.md:"),
+        "plan crosses independent repository: {stdout}"
+    );
+    unchanged(&nested, &before, "planning unrelated repository invariant");
+    let output = fixture
+        .selected_share(VaultSelection::Explicit, &nested.join("private.md"), true)
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "nested repository source accepted"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("independent repository"));
+    unchanged(
+        &fixture.shared,
+        &shared_before,
+        "nested source refusal before branch",
+    );
+    success(
+        &fixture
+            .selected_share(
+                VaultSelection::Explicit,
+                &fixture.vault.join("note.md"),
+                true,
+            )
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        std::fs::read(fixture.vault.join("pointer.md")).unwrap(),
+        b"See [[Team/Knowledge/Architecture/note]].\n"
+    );
+    unchanged(
+        &nested,
+        &before,
+        "apply unrelated repository invariant including index and objects",
+    );
+}

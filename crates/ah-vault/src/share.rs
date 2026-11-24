@@ -250,6 +250,15 @@ fn validate_shared_destination(shared: &Path, relative: &Path) -> Result<PathBuf
     Ok(destination)
 }
 
+/// A nested Git marker is an independent content boundary, including linked worktrees
+/// and dangling markers. An unreadable marker must not authorize traversal.
+fn independent_repository(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path.join(".git")) {
+        Ok(_) => true,
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
 /// Resolve a personal file without permitting symlink, traversal or shared-tree authority.
 fn validate_personal_file(vault: &Path, shared: &Path, relative: &Path) -> Result<PathBuf> {
     let components: Vec<_> = relative.components().collect();
@@ -273,6 +282,12 @@ fn validate_personal_file(vault: &Path, shared: &Path, relative: &Path) -> Resul
             anyhow::bail!(
                 "personal path is excluded from sharing: {}",
                 relative.display()
+            );
+        }
+        if path != vault && independent_repository(&path) {
+            anyhow::bail!(
+                "personal path enters an independent repository: {}",
+                path.display()
             );
         }
         path.push(part);
@@ -677,6 +692,9 @@ fn inbound_rewrites(
         .into_iter()
         .filter_entry(|entry| {
             !entry.path().starts_with(shared)
+                && !(entry.depth() > 0
+                    && entry.file_type().is_dir()
+                    && independent_repository(entry.path()))
                 && !(entry.depth() == 1
                     && matches!(
                         entry.file_name().to_str(),
@@ -1047,6 +1065,37 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_refuses_independent_repository_added_after_plan_before_branch() {
+        for marker in ["directory", "worktree-file", "dangling-link"] {
+            let fixture = Fixture::new();
+            let request = fixture.request();
+            let planned = plan(&request).unwrap();
+            let root = fixture.vault.join("Inbox");
+            match marker {
+                "directory" => std::fs::create_dir(root.join(".git")).unwrap(),
+                "worktree-file" => std::fs::write(root.join(".git"), "gitdir: missing\n").unwrap(),
+                _ => std::os::unix::fs::symlink(root.join("missing"), root.join(".git")).unwrap(),
+            }
+            let head = git(&fixture.shared, ["rev-parse", "HEAD"]);
+            let index = std::fs::read(fixture.shared.join(".git/index")).unwrap();
+            let error = super::apply(&request, &planned, "share", false).unwrap_err();
+            assert!(format!("{error:#}").contains("independent repository"));
+            assert_eq!(git(&fixture.shared, ["rev-parse", "HEAD"]), head);
+            assert_eq!(
+                std::fs::read(fixture.shared.join(".git/index")).unwrap(),
+                index
+            );
+            assert_eq!(git(&fixture.shared, ["branch", "--show-current"]), "main");
+            assert!(!fixture.shared.join(&planned.destination_rel).exists());
+            assert_eq!(
+                std::fs::read(root.join("a.md")).unwrap(),
+                b"See [[note]].\n"
+            );
+        }
     }
 
     #[test]
