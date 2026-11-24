@@ -40,11 +40,22 @@ fn isolated(command: &mut Command, home: &Path) {
         .env("GIT_COMMITTER_EMAIL", "matrix@example.invalid");
 }
 
-fn git(dir: &Path, args: &[&str]) -> String {
+fn fixture_git_command(dir: &Path, args: &[&str]) -> Command {
     let mut command = Command::new("git");
-    command.arg("-C").arg(dir).args(args);
+    // Fixture setup must finish before exact-state snapshots. Detached maintenance
+    // can otherwise mutate even the unrelated sentinel repository after commit.
+    // These overrides apply only to setup/assertion commands, never the Vesica CLI.
+    command
+        .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
+        .arg("-C")
+        .arg(dir)
+        .args(args);
     isolated(&mut command, dir);
-    let output = command.output().unwrap();
+    command
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let output = fixture_git_command(dir, args).output().unwrap();
     assert!(
         output.status.success(),
         "git {args:?}: {}",
@@ -244,6 +255,51 @@ fn success(output: &Output) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout.clone()).unwrap()
+}
+
+#[test]
+fn fixture_commits_do_not_spawn_background_maintenance() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    // Make automatic maintenance eligible even on a tiny fixture. Command-local
+    // fixture isolation must override local configuration without rewriting it.
+    git(&repo, &["config", "maintenance.auto", "true"]);
+    git(&repo, &["config", "gc.auto", "1"]);
+    std::fs::write(repo.join("note.md"), "Synthetic fixture.\n").unwrap();
+    git(&repo, &["add", "note.md"]);
+    let trace = temp.path().join("trace.jsonl");
+    let output = fixture_git_command(&repo, &["commit", "-qm", "fixture baseline"])
+        .env("GIT_TRACE2_EVENT", &trace)
+        .output()
+        .unwrap();
+    success(&output);
+    let events: Vec<serde_json::Value> = std::fs::read_to_string(&trace)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(events.iter().any(|event| event["event"] == "start"));
+    let maintenance: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            event["event"] == "child_start"
+                && event["argv"]
+                    .as_array()
+                    .is_some_and(|args| args.iter().any(|arg| arg == "maintenance" || arg == "gc"))
+        })
+        .collect();
+    assert!(
+        maintenance.is_empty(),
+        "fixture commit launched asynchronous Git maintenance: {maintenance:?}"
+    );
+    assert_eq!(
+        git(&repo, &["config", "--local", "maintenance.auto"]),
+        "true"
+    );
+    assert_eq!(git(&repo, &["config", "--local", "gc.auto"]), "1");
+    assert_eq!(git(&repo, &["show", "HEAD:note.md"]), "Synthetic fixture.");
 }
 
 #[test]
