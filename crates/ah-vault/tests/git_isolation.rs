@@ -2,6 +2,46 @@ use ah_vault::personal::{init, snapshot, SnapshotOutcome};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[test]
+fn fixture_commits_do_not_spawn_background_maintenance() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git(&repo, ["init", "-q", "-b", "main"]);
+    git(&repo, ["config", "user.name", "Test"]);
+    git(&repo, ["config", "user.email", "test@example.invalid"]);
+    git(&repo, ["config", "maintenance.auto", "true"]);
+    git(&repo, ["config", "gc.auto", "1"]);
+    std::fs::write(repo.join("note.md"), "Synthetic fixture.\n").unwrap();
+    git(&repo, ["add", "note.md"]);
+    let trace = temp.path().join("trace.jsonl");
+    let output = fixture_git_command(&repo, ["commit", "-qm", "fixture baseline"])
+        .env("GIT_TRACE2_EVENT", &trace)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let trace = std::fs::read_to_string(&trace).unwrap();
+    let start = regex::Regex::new(r#""event"\s*:\s*"start""#).unwrap();
+    let child = regex::Regex::new(r#""event"\s*:\s*"child_start""#).unwrap();
+    let maintenance = regex::Regex::new(r#""argv"\s*:\s*\[[^\]]*"(?:maintenance|gc)""#).unwrap();
+    assert!(trace.lines().any(|event| start.is_match(event)));
+    assert!(
+        !trace
+            .lines()
+            .any(|event| child.is_match(event) && maintenance.is_match(event)),
+        "fixture commit launched asynchronous Git maintenance"
+    );
+    assert_eq!(
+        git_text(&repo, ["config", "--local", "maintenance.auto"]),
+        "true"
+    );
+    assert_eq!(git_text(&repo, ["config", "--local", "gc.auto"]), "1");
+    assert_eq!(
+        git_text(&repo, ["show", "HEAD:note.md"]),
+        "Synthetic fixture."
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn snapshot_rejects_symlinked_git_directory_before_other_repository_mutation() {
@@ -324,19 +364,30 @@ fn tree_fingerprint(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     result
 }
 
+fn fixture_git_command<I, S>(cwd: &Path, args: I) -> Command
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut command = Command::new("git");
+    // Keep fixture setup synchronous before exact Git metadata snapshots. Do not
+    // apply these overrides to the production snapshot/share subprocesses.
+    command
+        .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null");
+    command
+}
+
 fn git<I, S>(cwd: &Path, args: I)
 where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .output()
-        .unwrap();
+    let output = fixture_git_command(cwd, args).output().unwrap();
     assert!(
         output.status.success(),
         "git failed: {}",
@@ -349,14 +400,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .output()
-        .unwrap();
+    let output = fixture_git_command(cwd, args).output().unwrap();
     assert!(output.status.success());
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
