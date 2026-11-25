@@ -1196,3 +1196,141 @@ fn equal_version_update_rejects_symlink_target_without_running_referent() {
     assert_eq!(std::fs::read_link(&target).unwrap(), referent);
     assert_eq!(std::fs::read(&referent).unwrap(), before);
 }
+
+#[test]
+fn bootstrap_and_update_agree_on_raw_version_stdout() {
+    use std::os::unix::fs::PermissionsExt;
+    let expected = b"vesica 9.9.9";
+    let cases: Vec<(&str, Vec<u8>, bool)> = vec![
+        ("no-newline", expected.to_vec(), true),
+        ("one-newline", [expected.as_slice(), b"\n"].concat(), true),
+        (
+            "trailing-newlines",
+            [expected.as_slice(), b"\n\n"].concat(),
+            true,
+        ),
+        (
+            "trailing-nul",
+            [expected.as_slice(), b"\0\n"].concat(),
+            false,
+        ),
+        (
+            "embedded-nul",
+            b"vesica 9.\0".iter().chain(b"9.9\n").copied().collect(),
+            false,
+        ),
+        (
+            "invalid-utf8",
+            [expected.as_slice(), b"\xff\n"].concat(),
+            false,
+        ),
+        (
+            "carriage-return",
+            [expected.as_slice(), b"\r\n"].concat(),
+            false,
+        ),
+        (
+            "leading-space",
+            [b" ".as_slice(), expected.as_slice(), b"\n"].concat(),
+            false,
+        ),
+        (
+            "trailing-space",
+            [expected.as_slice(), b" \n"].concat(),
+            false,
+        ),
+        (
+            "extra-line",
+            [expected.as_slice(), b"\nextra\n"].concat(),
+            false,
+        ),
+    ];
+    assert_eq!(cases.iter().filter(|case| case.2).count(), 3);
+    let bootstrap = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../install.sh");
+    for (name, stdout, accepted) in cases {
+        let temp = tempfile::tempdir().unwrap();
+        let dist = temp.path().join("dist");
+        // Emit exact raw bytes without putting NUL/invalid UTF-8 in the shell source.
+        let octal: String = stdout.iter().map(|byte| format!("\\{byte:03o}")).collect();
+        let script = format!("#!/bin/sh\nprintf '{octal}'\n");
+        let archive = fake_release_script(&dist, "v9.9.9", &script);
+        let update_target = temp.path().join("update-bin/vesica");
+        let update_original = installed_stub(&update_target, "0.0.1");
+        std::fs::set_permissions(&update_target, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let update_result = update(
+            &update_target,
+            &base_url(&dist),
+            &empty_root(&temp),
+            &["--tag", "v9.9.9"],
+        );
+        assert_eq!(
+            update_result.get_output().status.success(),
+            accepted,
+            "update/{name}: {:?}",
+            update_result.get_output()
+        );
+        let bootstrap_bin = temp.path().join("bootstrap-bin");
+        std::fs::create_dir(&bootstrap_bin).unwrap();
+        let bootstrap_target = bootstrap_bin.join("vesica");
+        let original = b"owner binary\0\xff\r\nno-final-newline";
+        std::fs::write(&bootstrap_target, original).unwrap();
+        std::fs::set_permissions(&bootstrap_target, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let result = std::process::Command::new("sh")
+            .arg(&bootstrap)
+            .arg("--from-file")
+            .arg(&archive)
+            .arg("--bootstrap-only")
+            .env("HOME", temp.path())
+            .env("TMPDIR", temp.path())
+            .env("VESICA_VERSION", "v9.9.9")
+            .env("VESICA_BIN_DIR", &bootstrap_bin)
+            .output()
+            .unwrap();
+        assert_eq!(
+            result.status.success(),
+            accepted,
+            "bootstrap/{name}: {result:?}"
+        );
+        if accepted {
+            assert_eq!(
+                std::fs::read(&bootstrap_target).unwrap(),
+                script.as_bytes(),
+                "{name}"
+            );
+            assert!(
+                String::from_utf8_lossy(&result.stdout).starts_with("vesica 9.9.9 installed to "),
+                "{name}"
+            );
+        } else {
+            assert_eq!(
+                std::fs::read(&bootstrap_target).unwrap(),
+                original,
+                "{name}"
+            );
+            assert_eq!(
+                std::fs::read(&update_target).unwrap(),
+                update_original.as_bytes(),
+                "{name}"
+            );
+            for target in [&bootstrap_target, &update_target] {
+                let node = std::fs::symlink_metadata(target).unwrap();
+                assert!(node.is_file() && !node.file_type().is_symlink(), "{name}");
+                assert_eq!(node.permissions().mode() & 0o777, 0o700, "{name}");
+                assert_eq!(
+                    std::fs::read_dir(target.parent().unwrap()).unwrap().count(),
+                    1,
+                    "{name}"
+                );
+            }
+            assert!(
+                String::from_utf8_lossy(&result.stderr).contains("version mismatch"),
+                "{name}"
+            );
+            assert!(
+                !String::from_utf8_lossy(&result.stdout).contains(" installed to "),
+                "{name}"
+            );
+        }
+    }
+}

@@ -396,3 +396,17 @@ vault-root file/README candidates retain their precedence; only an unqualified b
 exactly one remaining valid Markdown match is rewritten. Matching is case-sensitive on the
 supported Linux filesystem. Aliases and heading anchors are preserved. Qualified links to other
 notes, unresolved paths, and excluded shared/repository storage are not redirected by basename.
+
+## Bootstrap replacement boundary
+
+Bootstrap captures raw version stdout before shell substitution and rejects NUL-bearing output.
+Only trailing newlines are ignored; other bytes/whitespace must match the expected identity,
+as in the updater. Validation happens before touching the destination. An existing target
+must be absent or a real regular file; live/dangling symlinks and directories are refused.
+The new executable is copied into an exclusive private sibling on the target filesystem, then
+published by Linux rename. Copy or rename failures preserve the existing binary's bytes and
+mode; successful replacement requests mode `0755` and does not truncate old hardlink aliases.
+Owned staging is removed on failure; cleanup errors name the retained path. This is bounded
+returned-error/atomic-publication behavior, not protection against concurrent owner edits or
+power loss. Binary publication does not roll back a later `vesica install` handoff failure.
+Checksum and version checks do not authenticate publisher provenance or provide signatures.

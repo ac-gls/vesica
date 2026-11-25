@@ -123,7 +123,8 @@ identity_rejection() {
   local release="$TMP/$name-release" bin="$TMP/$name-bin"
   mkdir -p "$release" "$bin"
   printf 'existing executable\000\377\r\nno-final-newline' > "$bin/vesica"
-  cp "$bin/vesica" "$TMP/$name-preimage"
+  chmod 0700 "$bin/vesica"
+  cp -p "$bin/vesica" "$TMP/$name-preimage"
   if [[ "$name" == missing ]]; then
     printf 'release metadata\n' > "$release/metadata"
     tar -C "$release" -czf "$release/vesica-${VESICA_VERSION}-x86_64-linux.tar.gz" metadata
@@ -139,6 +140,9 @@ identity_rejection() {
   fi
   grep -q "$expected" "$TMP/$name-out" || fail "$name rejection did not report $expected"
   cmp -s "$bin/vesica" "$TMP/$name-preimage" || fail "$name validation changed existing bytes"
+  [[ -f "$bin/vesica" && ! -L "$bin/vesica" ]] || fail "$name validation changed target type"
+  assert_eq "$(stat -c %a "$bin/vesica")" 700 "$name validation changed target mode"
+  ! grep -q " installed to " "$TMP/$name-out" || fail "$name validation falsely reported success"
   [[ ! -e "$VESICA_CALLS" ]] || fail "$name rejection invoked install"
   shopt -s dotglob nullglob
   local entries=("$bin"/*)
@@ -152,6 +156,157 @@ identity_rejection non-executable 'version probe failed' $'#!/bin/sh\nprintf "ve
 identity_rejection failed-command 'version probe failed' $'#!/does/not/exist\n' 0755
 identity_rejection malformed 'version mismatch' $'#!/bin/sh\nprintf "vesica %s\\nextra output\\n" "${VESICA_VERSION#v}"\n' 0755
 identity_rejection empty-output 'version mismatch' $'#!/bin/sh\nexit 0\n' 0755
+identity_rejection nul-output 'version mismatch' $'#!/bin/sh\nprintf \"vesica %s\\000\\n\" \"${VESICA_VERSION#v}\"\n' 0755
+
+# Cleanup owns only artifacts created by this invocation, never caller environment paths.
+inherited_cleanup_path_rejection() {
+  local name=$1 variable=$2 failure=$3 victim="$TMP/inherited-$1-victim"
+  local bin="$TMP/inherited-$1-bin" archive expected
+  mkdir -p "$bin"
+  printf 'owner bytes\000\377\r\nno-final-newline' > "$bin/vesica"
+  chmod 0700 "$bin/vesica"
+  if [[ "$variable" == STAGED ]]; then
+    victim="$bin/vesica"
+  else
+    mkdir -p "$victim"
+    printf 'owner directory sentinel\000\377' > "$victim/sentinel"
+    chmod 0700 "$victim"
+  fi
+  cp -p "$bin/vesica" "$TMP/inherited-$name-before"
+  if [[ "$variable" == WORK ]]; then cp -p "$victim/sentinel" "$TMP/inherited-$name-sentinel"; fi
+  archive="$TMP/mismatch-release/vesica-${VESICA_VERSION}-x86_64-linux.tar.gz"
+  expected='version mismatch'
+  local path="$PATH" platform=Linux
+  if [[ "$failure" == platform ]]; then
+    path="$TMP/fake-bin:$PATH"; platform=Darwin; expected='only Linux hosts are supported'
+  fi
+  if env "$variable=$victim" PATH="$path" VESICA_TEST_UNAME_S="$platform" VESICA_BIN_DIR="$bin" sh "$INSTALLER" --from-file "$archive" --bootstrap-only >"$TMP/inherited-$name-out" 2>&1; then
+    fail "inherited $name unexpectedly succeeded"
+  fi
+  grep -q "$expected" "$TMP/inherited-$name-out" || fail "inherited $name failed at wrong boundary"
+  [[ -f "$bin/vesica" && ! -L "$bin/vesica" ]] || fail "inherited $name deleted/replaced existing binary"
+  cmp -s "$bin/vesica" "$TMP/inherited-$name-before" || fail "inherited $name changed existing binary"
+  assert_eq "$(stat -c %a "$bin/vesica")" 700 "inherited $name changed binary mode"
+  if [[ "$variable" == WORK ]]; then
+    [[ -d "$victim" && ! -L "$victim" ]] || fail "inherited $name deleted owner directory"
+    cmp -s "$victim/sentinel" "$TMP/inherited-$name-sentinel" || fail "inherited $name changed sentinel"
+    assert_eq "$(stat -c %a "$victim")" 700 "inherited $name changed directory mode"
+  fi
+  printf 'PASS: bootstrap ignores inherited %s cleanup path on %s rejection\n' "$variable" "$failure"
+}
+if [[ "${VESICA_TEST_CLEANUP_ROW:-all}" == all || "${VESICA_TEST_CLEANUP_ROW:-}" == staged ]]; then inherited_cleanup_path_rejection staged STAGED version; fi
+if [[ "${VESICA_TEST_CLEANUP_ROW:-all}" == all || "${VESICA_TEST_CLEANUP_ROW:-}" == work ]]; then inherited_cleanup_path_rejection work WORK platform; fi
+
+# Destination-side copy/rename failures must never damage a previously installed binary.
+bootstrap_replacement_failure() {
+  local operation=$1 bin="$TMP/replacement-$1-bin" shims="$TMP/replacement-$1-shims"
+  mkdir -p "$bin" "$shims"
+  printf 'old executable\000\377\r\nno-final-newline' > "$bin/vesica"
+  chmod 0700 "$bin/vesica"
+  cp -p "$bin/vesica" "$TMP/replacement-$1-before"
+  if [[ "$operation" == copy ]]; then
+    cat > "$shims/install" <<'SHIM'
+#!/bin/sh
+# Record the real copy destination, write a partial result, and fail synchronously.
+for target do :; done
+printf '%s\n' "$target" > "$VESICA_BOOTSTRAP_COPY_RECEIPT"
+printf 'partial new executable' > "$target"
+exit 29
+SHIM
+  else
+    cat > "$shims/mv" <<'SHIM'
+#!/bin/sh
+printf 'injected rename failure\n' >&2
+exit 30
+SHIM
+  fi
+  chmod +x "$shims"/*
+  if PATH="$shims:$PATH" VESICA_BOOTSTRAP_COPY_RECEIPT="$TMP/copy-receipt" VESICA_BIN_DIR="$bin" sh "$INSTALLER" --from-file "$TMP/release/vesica-${VESICA_VERSION}-x86_64-linux.tar.gz" --bootstrap-only >"$TMP/replacement-$1-out" 2>&1; then
+    fail "bootstrap accepted injected $operation failure"
+  fi
+  cmp -s "$bin/vesica" "$TMP/replacement-$1-before" || fail "$operation failure damaged old executable"
+  assert_eq "$(stat -c %a "$bin/vesica")" 700 "$operation failure changed old executable mode"
+  if [[ "$operation" == copy ]]; then
+    [[ "$(<"$TMP/copy-receipt")" == "$bin"/.vesica-bootstrap.* ]] || fail "copy was not staged on target filesystem"
+  fi
+  shopt -s dotglob nullglob
+  local entries=("$bin"/*)
+  shopt -u dotglob nullglob
+  assert_eq "${#entries[@]}" 1 "$operation failure left owned staging artifacts"
+  printf 'PASS: bootstrap %s failure preserves existing bytes/mode and cleans staging\n' "$operation"
+}
+bootstrap_replacement_failure copy
+bootstrap_replacement_failure rename
+
+# Report a retained owned sibling when preparation and its cleanup both fail.
+mkdir -p "$TMP/cleanup-bin" "$TMP/cleanup-shims"
+printf 'old binary\000\377' > "$TMP/cleanup-bin/vesica"
+chmod 0700 "$TMP/cleanup-bin/vesica"
+cp -p "$TMP/cleanup-bin/vesica" "$TMP/cleanup-before"
+cat > "$TMP/cleanup-shims/install" <<'SHIM'
+#!/bin/sh
+for target do :; done
+printf '%s\n' "$target" > "$VESICA_BOOTSTRAP_COPY_RECEIPT"
+printf 'partial candidate' > "$target"
+exit 29
+SHIM
+cat > "$TMP/cleanup-shims/rm" <<'SHIM'
+#!/bin/sh
+for arg do
+  case "$arg" in */.vesica-bootstrap.*) printf 'injected staging unlink failure\n' >&2; exit 31 ;; esac
+ done
+exec /bin/rm "$@"
+SHIM
+chmod +x "$TMP/cleanup-shims"/*
+if PATH="$TMP/cleanup-shims:$PATH" VESICA_BOOTSTRAP_COPY_RECEIPT="$TMP/cleanup-receipt" VESICA_BIN_DIR="$TMP/cleanup-bin" sh "$INSTALLER" --from-file "$TMP/release/vesica-${VESICA_VERSION}-x86_64-linux.tar.gz" --bootstrap-only >"$TMP/cleanup-out" 2>&1; then
+  fail 'bootstrap accepted preparation/cleanup failure'
+fi
+retained_stage=$(<"$TMP/cleanup-receipt")
+[[ "$retained_stage" == "$TMP/cleanup-bin"/.vesica-bootstrap.* ]] || fail 'cleanup receipt was not owned staging'
+[[ -f "$retained_stage" ]] || fail 'cleanup failure did not retain staged file'
+grep -q 'cannot prepare staged executable; existing binary unchanged' "$TMP/cleanup-out" || fail 'cleanup failure hid primary error'
+grep -Fq "staging cleanup failed; retained $retained_stage" "$TMP/cleanup-out" || fail 'cleanup error omitted exact retained path'
+cmp -s "$TMP/cleanup-bin/vesica" "$TMP/cleanup-before" || fail 'cleanup failure changed old binary'
+assert_eq "$(stat -c %a "$TMP/cleanup-bin/vesica")" 700 'cleanup failure changed old mode'
+printf 'PASS: bootstrap cleanup failure preserves old binary and reports retained owned staging\n'
+
+# Refuse non-regular existing targets without following or replacing them.
+for shape in live-link dangling-link directory; do
+  bin="$TMP/type-$shape-bin"
+  mkdir -p "$bin"
+  printf 'unmanaged referent bytes\000\377' > "$TMP/type-$shape-outside"
+  cp "$TMP/type-$shape-outside" "$TMP/type-$shape-before"
+  case "$shape" in
+    live-link) ln -s "$TMP/type-$shape-outside" "$bin/vesica" ;;
+    dangling-link) ln -s "$TMP/absent-referent" "$bin/vesica" ;;
+    directory) mkdir "$bin/vesica"; printf 'owner directory' > "$bin/vesica/sentinel" ;;
+  esac
+  if VESICA_BIN_DIR="$bin" sh "$INSTALLER" --from-file "$TMP/release/vesica-${VESICA_VERSION}-x86_64-linux.tar.gz" --bootstrap-only >"$TMP/type-$shape-out" 2>&1; then
+    fail "bootstrap accepted existing $shape"
+  fi
+  grep -Eq 'symlink|not a regular file' "$TMP/type-$shape-out" || fail "missing target-type refusal"
+  cmp -s "$TMP/type-$shape-outside" "$TMP/type-$shape-before" || fail "bootstrap wrote through $shape referent"
+  case "$shape" in
+    live-link) assert_eq "$(readlink "$bin/vesica")" "$TMP/type-$shape-outside" "live link changed" ;;
+    dangling-link) assert_eq "$(readlink "$bin/vesica")" "$TMP/absent-referent" "dangling link changed" ;;
+    directory) assert_eq "$(<"$bin/vesica/sentinel")" 'owner directory' "directory changed" ;;
+  esac
+  printf 'PASS: bootstrap refuses %s and preserves unmanaged nodes\n' "$shape"
+done
+
+# A successful replacement publishes a new inode rather than truncating a hardlinked old binary.
+mkdir -p "$TMP/hardlink-bin"
+printf 'old hardlinked executable' > "$TMP/hardlink-bin/vesica"
+ln "$TMP/hardlink-bin/vesica" "$TMP/hardlink-outside"
+VESICA_BIN_DIR="$TMP/hardlink-bin" sh "$INSTALLER" --from-file "$TMP/release/vesica-${VESICA_VERSION}-x86_64-linux.tar.gz" --bootstrap-only >"$TMP/hardlink-out" 2>&1
+assert_eq "$(<"$TMP/hardlink-outside")" 'old hardlinked executable' 'successful bootstrap truncated old hardlink'
+assert_eq "$("$TMP/hardlink-bin/vesica" --version)" "vesica ${VESICA_VERSION#v}" 'replacement identity differs'
+assert_eq "$(stat -c %a "$TMP/hardlink-bin/vesica")" 755 'replacement mode differs'
+shopt -s dotglob nullglob
+hardlink_entries=("$TMP/hardlink-bin"/*)
+shopt -u dotglob nullglob
+assert_eq "${#hardlink_entries[@]}" 1 'success left staging artifacts'
+printf 'PASS: bootstrap successful replacement preserves old hardlink and cleans staging\n'
 
 # Normal invocation forwards install arguments without word splitting.
 rm -f "$VESICA_BIN_DIR/vesica"
