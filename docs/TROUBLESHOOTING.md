@@ -205,3 +205,96 @@ with precedence over `VESICA_ROOT`, then `AGENT_HOME_ROOT`, then `HOME`.
 These are conservative metadata checks, not an atomic no-follow guarantee against
 concurrent filesystem replacement. Keep real/private data out of disposable trials
 until the separate rollout gates have been accepted.
+
+
+## Private configuration permissions
+
+On supported Unix hosts, new managed regular configuration files (Bash blocks,
+Claude/Codex instruction files, merged JSON, `config.env`, machine-local
+`config.toml`, and `manifest.json`) request mode `0600` at creation. A umask may
+restrict that further; it cannot add group/other access. Backups and atomic
+replacement staging also start private (`0600`), before any content is written.
+The tested umasks are `000`, `022`, and `077`.
+
+Replacement of existing managed content targets and machine-local `config.toml`
+preserves their current permissions, including an owner-selected `0640`.
+**Exception:** `manifest.json` is rewritten through a new private file requesting
+`0600` (subject to umask); owner-added group access on that manifest is not
+preserved. Executor rollback restores captured managed-content preimage permissions. Uninstall restores original bytes while preserving
+the still-owned target's current permissions; it does not infer a historic mode
+from a backup's `0600`. The schema-1 manifest does not persist original modes, so
+there is no mode-field migration in this change and no automatic reconstruction
+of permissions lost by an older release. Node/type/content checks and retained
+owner edits still apply. Unix mode tests are not Windows ACL validation.
+
+### Owner-led legacy backup exposure review
+
+A newer Vesica binary does **not** automatically tighten old backup files. Do not
+run an exposure audit or repair against a real home without explicit machine-owner
+approval of the selected paths and the read-only/repair scope. Disposable tests do
+not grant that approval.
+
+1. Stop Vesica and other writers. Have the owner identify the affected install
+   root and exact backup/config paths from their records. Use direct paths with
+   real directory components; do not trust an editable manifest as authorization
+   to inspect arbitrary locations. Preserve existing recovery evidence privately.
+2. For each approved path, inspect metadata only; never print file content. On
+   Linux, for an individually reviewed path:
+
+   ```sh
+   stat -c 'mode=%a uid=%u links=%h type=%F path=%n' -- '/reviewed/direct/path'
+   ```
+
+   Check every ancestor separately for symlinks; `stat` does not make ancestor
+   traversal safe. Stop on a symlink, non-regular file, unexpected owner or hard
+   link count greater than one. Record mode, owner, link count and parent-directory
+   access/ACLs privately. Do not use recursive scans or publish home-path inventories.
+3. Group/other bits on a secret-bearing backup require owner review even if a
+   parent currently blocks traversal. Inspect ACLs with the host's ACL tools when
+   applicable; mode bits alone do not establish who could read it. Tightening now
+   cannot revoke past copies: review credential rotation if exposure was possible.
+4. Obtain a **separate explicit repair approval** for named files. Tighten a
+   confirmed private backup to `0600`; preserve an intentional configuration mode
+   such as `0640` unless its owner chooses otherwise. Use a no-follow opened file
+   handle, verify its type/owner/link count and identity again, then change only
+   that file's mode and verify it through the same handle. Stop on a changed node;
+   do not use blind `chmod`, recursive repair, content rewriting or backup deletion.
+   Repair ACLs only under a separately reviewed host-specific policy.
+5. Record before/after metadata without contents, and retry Vesica only after the
+   owner has resolved any retained entries. Until this procedure is approved and
+   executed on the affected real machine, legacy exposure remains unassessed.
+
+## Legacy relative manifests
+
+`manifest ... path is not absolute` means an older or edited manifest contains a
+relative `shared_home`, `vault`, entry `target`, `backup` or `source`. Install,
+including `--dry-run`, and uninstall refuse it before managed changes. **Do not
+rebase using the current directory**, delete the manifest, discard skipped entries,
+or remove backups merely to bypass this guard. No automatic migration is performed.
+
+1. Stop writes and preserve a private copy of the manifest, machine configuration
+   and backups with their original node types and permissions. Never paste those
+   files or their contents into a public issue.
+2. With the machine owner, establish the original install base from trustworthy
+   installation records or a known-good snapshot. The current working directory,
+   current `--root`, or a plausible existing filename is not evidence of that base.
+   If it cannot be established, keep refusal in place and obtain an owner-led
+   recovery plan; do not guess absolute paths.
+3. If the base is proven, review a **copy** of the manifest with the owner. Resolve
+   each relative field against its proven original base, checking entry keys and
+   target correspondence, backup identity and hashes, and any traversal or symlink
+   ancestry. Validate all resulting paths against the selected machine root and
+   independently authorized local vault configuration. Absolute spelling alone
+   does not grant permission to touch an outside path. Preserve schema and hashes;
+   do not claim a hash proves filesystem ownership.
+4. Only with explicit repair approval, install the reviewed manifest copy with
+   private permissions while writers remain stopped. Preview with
+   `vesica install --home-repo <shared> --root <machine> --dry-run`. This checks
+   manifest absolute paths and scope, but **is not a complete type, ownership or
+   backup-integrity validator**: an altered backup can produce a clean preview
+   while a real install refuses it. Have the owner separately review target types,
+   ownership and backup integrity; do not run a mutating install merely to test
+   them. A clean plan is not permission to apply it. The real operation still must
+   pass its own type, backup, containment and local-config authorization checks.
+   Review the plan and retained state with the owner before approving any real
+   install/uninstall. No recovery was performed automatically by the diagnostic.
