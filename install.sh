@@ -23,8 +23,21 @@ die() { printf 'vesica bootstrap: %s\n' "$1" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
 
 # Split our options from the ones meant for `vesica install`.
+# Ownership starts empty; inherited environment paths are never cleanup authority.
+STAGED=""
+WORK=""
 ARGS_FILE=$(mktemp)
-trap 'rm -f "$ARGS_FILE"; [ -n "${WORK:-}" ] && rm -rf "$WORK"' EXIT
+cleanup() {
+  status=$?
+  if [ -n "${STAGED:-}" ] && [ -e "$STAGED" ]; then
+    rm -f "$STAGED" || { printf 'vesica bootstrap: staging cleanup failed; retained %s\n' "$STAGED" >&2; status=1; }
+  fi
+  rm -f "$ARGS_FILE" || status=1
+  if [ -n "${WORK:-}" ]; then rm -rf "$WORK" || status=1; fi
+  trap - EXIT
+  exit "$status"
+}
+trap cleanup EXIT
 while [ $# -gt 0 ]; do
   case "$1" in
     --from-file) [ $# -ge 2 ] || die "--from-file needs a path"; FROM_FILE=$2; shift 2 ;;
@@ -57,11 +70,30 @@ fi
 
 tar -xzf "$WORK/$ASSET" -C "$WORK"
 [ -f "$WORK/vesica" ] || die "release tarball does not contain vesica"
-version_output=$("$WORK/vesica" --version 2>/dev/null) || die "version probe failed: staged vesica --version exited unsuccessfully"
+# Shell substitution erases NUL bytes. Preserve raw stdout and reject that lossy case first.
+need tr
+need cmp
+need cat
+"$WORK/vesica" --version > "$WORK/version.stdout" 2>/dev/null || die "version probe failed: staged vesica --version exited unsuccessfully"
+LC_ALL=C tr -d '\000' < "$WORK/version.stdout" > "$WORK/version.nonul"
+cmp -s "$WORK/version.stdout" "$WORK/version.nonul" || die "version mismatch: malformed NUL in staged version output"
+# Only trailing newlines are removed, matching the updater's existing identity rule.
+version_output=$(cat "$WORK/version.stdout")
 REPORTED_VERSION=$version_output
 [ "$REPORTED_VERSION" = "vesica ${VERSION#v}" ] || die "version mismatch: expected vesica ${VERSION#v}, got ${REPORTED_VERSION:-no version}"
 mkdir -p "$BIN_DIR"
-install -m 0755 "$WORK/vesica" "$BIN_DIR/vesica"
+check_target() {
+  [ ! -L "$BIN_DIR/vesica" ] || die "existing binary is a symlink: refusing replacement"
+  [ ! -e "$BIN_DIR/vesica" ] || [ -f "$BIN_DIR/vesica" ] || die "existing binary is not a regular file: refusing replacement"
+}
+check_target
+# A private, exclusively created sibling stays on the destination filesystem. Preparation
+# never opens the installed executable; Linux rename is the publication/acceptance boundary.
+STAGED=$(mktemp "$BIN_DIR/.vesica-bootstrap.XXXXXX") || die "cannot prepare target-side staging"
+install -m 0755 "$WORK/vesica" "$STAGED" || die "cannot prepare staged executable; existing binary unchanged"
+check_target
+mv -fT "$STAGED" "$BIN_DIR/vesica" || die "cannot publish staged executable; existing binary unchanged"
+STAGED=""
 printf '%s installed to %s\n' "$REPORTED_VERSION" "$BIN_DIR/vesica"
 
 [ "$BOOTSTRAP_ONLY" = "1" ] && exit 0
