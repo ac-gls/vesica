@@ -1,62 +1,75 @@
 name: discovery
-
-# Manual-only S2/S3 discovery run (plan §6 Phase 0). It is deliberately workflow_dispatch-only and
-# is NOT a required check: it observes how the supported agent CLIs discover instructions, skills
-# and role agents on a GitHub-hosted Ubuntu VM, in a disposable HOME, with no credentials and no
-# model calls. Findings feed the B6 role renderer. Evidence: job summary + artifact.
+run-name: Isolated dogfood of d6c1cdb (native Ubuntu, credential-free)
 on:
   workflow_dispatch:
-    inputs:
-      strict:
-        description: Fail the run when a documented claim is not corroborated
-        type: boolean
-        default: false
-
 permissions:
   contents: read
-
 jobs:
-  s2-s3-discovery:
-    name: S2/S3 agent discovery (ubuntu-24.04)
+  dogfood:
     runs-on: ubuntu-24.04
-    env:
-      VESICA_REQUIRE_NATIVE: "1"
+    timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - name: Host record
+      - name: Harness checkout
+        uses: actions/checkout@v4
+        with:
+          path: harness
+          persist-credentials: false
+      - name: Pinned product checkout
+        uses: actions/checkout@v4
+        with:
+          ref: d6c1cdb296ceab7e2445a4517bd09f512da75911
+          path: product
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Rust setup
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Build actual fixed static binary and test package
         run: |
-          grep -E '^(PRETTY_NAME|VERSION_ID)=' /etc/os-release
-          uname -sr; uname -m; node --version; python3 --version
-          systemd-detect-virt || true
-      - name: Install probe tooling
-        run: |
+          set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq strace python3-venv >/dev/null
-          strace --version | head -1
-      # runner.* contexts are only available inside steps, so the evidence paths are set here
-      # rather than in a workflow-level env block (which GitHub rejects at parse time).
-      - name: S2/S3 discovery
-        env:
-          VESICA_EVIDENCE: ${{ runner.temp }}/discovery-evidence.md
-          VESICA_EVIDENCE_JSON: ${{ runner.temp }}/discovery-evidence.json
-          VESICA_DISCOVERY_TMP_ROOT: ${{ runner.temp }}
-          VESICA_DISCOVERY_STRICT: ${{ inputs.strict && '1' || '0' }}
-        run: bash tests/discovery-linux.sh
-      - name: Job summary
-        if: always()
-        env:
-          VESICA_EVIDENCE: ${{ runner.temp }}/discovery-evidence.md
+          sudo apt-get install -y -qq musl-tools strace >/dev/null
+          cd product
+          test "$(git rev-parse HEAD)" = d6c1cdb296ceab7e2445a4517bd09f512da75911
+          bash scripts/build-release.sh v0.1.0-alpha.4 dist
+          git status --porcelain
+      - name: Create disposable non-sudo account and isolated assets
         run: |
-          {
-            echo '## S2/S3 agent discovery'
-            echo
-            if [ -f "$VESICA_EVIDENCE" ]; then cat "$VESICA_EVIDENCE"; else echo 'No evidence file was produced — the harness did not finish.'; fi
-          } >>"$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          sudo useradd --create-home --shell /bin/bash vesica-dogfood
+          sudo install -d -m 0755 /opt/vesica-dogfood
+          sudo cp -a product /opt/vesica-dogfood/product
+          sudo install -d -m 0755 /opt/vesica-dogfood/evidence /opt/vesica-dogfood/release-endpoint/v0.1.0-alpha.4 /opt/vesica-dogfood/dist
+          sudo cp product/dist/* /opt/vesica-dogfood/dist/
+          sudo cp product/dist/* /opt/vesica-dogfood/release-endpoint/v0.1.0-alpha.4/
+          sudo cp harness/tests/isolated-dogfood.py /opt/vesica-dogfood/
+          sudo chown -R vesica-dogfood:vesica-dogfood /opt/vesica-dogfood
+          sudo install -d -m 0755 /opt/vesica-dogfood/tools/bin /opt/vesica-dogfood/tools/lib
+          sudo cp "$(command -v node)" /opt/vesica-dogfood/tools/bin/node
+          sudo cp -a "$(dirname "$(dirname "$(readlink -f "$(command -v npm)")")")" /opt/vesica-dogfood/tools/lib/npm
+          sudo ln -s ../lib/npm/bin/npm-cli.js /opt/vesica-dogfood/tools/bin/npm
+          sudo -u vesica-dogfood env -i HOME=/home/vesica-dogfood USER=vesica-dogfood LOGNAME=vesica-dogfood PATH="/opt/vesica-dogfood/tools/bin:/usr/local/bin:/usr/bin:/bin" XDG_CONFIG_HOME=/home/vesica-dogfood/.config XDG_CACHE_HOME=/home/vesica-dogfood/.cache TMPDIR=/home/vesica-dogfood npm_config_userconfig=/home/vesica-dogfood/.npmrc npm install -g --prefix /home/vesica-dogfood/.npm-global --no-audit --no-fund @anthropic-ai/claude-code@2.1.328 @openai/codex@0.170.0 opencode-ai@1.19.6 @github/copilot@1.0.114
+      - name: Native isolated lifecycle dogfood
+        env:
+          DOGFOOD_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # Child receives an explicit allowlist: no Actions token, user token, cloud/model auth.
+          sudo -u vesica-dogfood env -i HOME=/home/vesica-dogfood USER=vesica-dogfood LOGNAME=vesica-dogfood PATH="/home/vesica-dogfood/.npm-global/bin:/opt/vesica-dogfood/tools/bin:/usr/local/bin:/usr/bin:/bin" XDG_CONFIG_HOME=/home/vesica-dogfood/.config XDG_DATA_HOME=/home/vesica-dogfood/.local/share XDG_STATE_HOME=/home/vesica-dogfood/.local/state XDG_CACHE_HOME=/home/vesica-dogfood/.cache TMPDIR=/home/vesica-dogfood GIT_CONFIG_NOSYSTEM=1 DOGFOOD_RUN_URL="$DOGFOOD_RUN_URL" python3 /opt/vesica-dogfood/isolated-dogfood.py
+      - name: Preserve partial or completed evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          sudo cp -a /opt/vesica-dogfood/evidence "$RUNNER_TEMP/dogfood-evidence"
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/dogfood-evidence"
+          python3 -c 'import json,os,pathlib; p=pathlib.Path(os.environ["RUNNER_TEMP"])/"dogfood-evidence/results.json"; d=json.loads(p.read_text()) if p.exists() else {}; print(json.dumps(d.get("checks",[]),indent=2))' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: s2-s3-discovery-evidence
-          path: |
-            ${{ runner.temp }}/discovery-evidence.md
-            ${{ runner.temp }}/discovery-evidence.json
-          if-no-files-found: warn
+          name: isolated-dogfood-evidence
+          path: ${{ runner.temp }}/dogfood-evidence
+          if-no-files-found: error
+          retention-days: 30
