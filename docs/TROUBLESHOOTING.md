@@ -182,6 +182,33 @@ Beyond the blocker rows above:
 - **`content-guard` fails.** The public app repository must not contain team content. The rule ID (`VCG001`–`VCG005`) and the file:line tell you what to remove. Team material belongs in the private shared home.
 - **`supply-chain` fails.** A dependency has a RustSec advisory or a licence outside `deny.toml`. Prefer replacing the dependency over adding an ignore.
 
+## Share preflight and failure-return recovery
+
+Before creating the share branch, apply captures original rewrite bytes, real-file
+paths and permissions, and computes the complete planned rewrite set. It briefly
+creates/removes an exclusive empty private sibling in each affected personal
+parent to check current staging access (also the source parent for `--move`).
+`cannot preflight rewrite ... Permission denied` refuses before shared Git/content
+mutation. Empty preflight siblings are not durable recovery journals.
+
+Immediately before each rewrite, apply revalidates its real path/type, original
+bytes and permissions. `rewrite changed after preflight` preserves an intervening
+personal edit and attempts guarded rollback of earlier owned rewrites. A normal
+fully restored failure can be retried safely. If personal restoration conflicts,
+the promotion/share branch is retained to avoid deleting the target of a remaining
+rewritten link; repeated apply refuses the occupied destination without overwriting
+it. Preserve that state and resolve it with the machine owner; do not delete the
+promotion to bypass refusal. Promotion permissions are captured from the created
+file before Git hooks run. A subsequent type, byte or permission change refuses
+destructive destination cleanup and retains the promotion/share branch with
+`destination cleanup refused`; a permission-only owner edit is not discarded.
+
+This is best-effort recovery from a returned error, not crash recovery, a
+standalone recovery command, or an atomic no-follow/race guarantee. Parent access
+can change after preflight; source-removal errors still run guarded rollback.
+Semantic Git index entries are restored after normal rollback, not necessarily
+byte-identical index metadata or reflog history.
+
 ## Personal vault write boundaries
 
 `vault init`, `fix`, `new-note`, `snapshot`, and install/update re-link adoption

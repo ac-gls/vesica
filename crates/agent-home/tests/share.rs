@@ -118,6 +118,124 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn share_rollback_preserves_permission_edited_committed_promotion() {
+    use std::os::unix::fs::PermissionsExt;
+    for mode in [0o400, 0o640] {
+        for move_source in [false, true] {
+            let fixture = Fixture::new();
+            let source = fixture.valid_note("Inbox/cache.md");
+            let first = fixture.note("Inbox/a.md", "See [[cache]].\n");
+            let later = fixture.note("Inbox/z.md", "Later [[cache]].\n");
+            for path in [&source, &first, &later] {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            let source_before = std::fs::read(&source).unwrap();
+            let first_before = std::fs::read(&first).unwrap();
+            let later_before = std::fs::read(&later).unwrap();
+            let main = fixture.git(&fixture.shared, &["rev-parse", "main"]);
+            let promotion = fixture.shared.join("Knowledge/Architecture/cache.md");
+            let receipt = fixture._temp.path().join("promotion-receipt");
+            let mode_receipt = fixture._temp.path().join("mode-receipt");
+            let hook = fixture.shared.join(".git/hooks/post-commit");
+            // Git invokes hooks at the shared repository root; all paths below are
+            // fixed fixture-relative strings, never interpolated personal paths.
+            std::fs::write(&hook, format!(
+                "#!/bin/sh\nset -eu\ncp Knowledge/Architecture/cache.md ../promotion-receipt\nchmod {mode:o} Knowledge/Architecture/cache.md\nstat -c %a Knowledge/Architecture/cache.md > ../mode-receipt\nchmod 400 ../vault/Inbox/z.md\n"
+            )).unwrap();
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let extra = if move_source {
+                vec!["--area", "Architecture", "--yes", "--move"]
+            } else {
+                vec!["--area", "Architecture", "--yes"]
+            };
+            let output = fixture
+                .share("Inbox/cache.md", &extra)
+                .failure()
+                .get_output()
+                .clone();
+            assert_eq!(output.status.code(), Some(1));
+            assert_eq!(
+                std::fs::read_to_string(&mode_receipt).unwrap().trim(),
+                format!("{mode:o}")
+            );
+            assert!(
+                promotion.is_file(),
+                "rollback silently deleted permission-edited promotion"
+            );
+            assert_eq!(
+                std::fs::read(&promotion).unwrap(),
+                std::fs::read(&receipt).unwrap()
+            );
+            assert_eq!(
+                std::fs::symlink_metadata(&promotion)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                mode
+            );
+            let error = String::from_utf8(output.stderr).unwrap();
+            assert!(error.contains("rewrite changed after preflight"), "{error}");
+            assert!(
+                error.contains("share rollback incomplete")
+                    && error.contains("destination cleanup refused"),
+                "{error}"
+            );
+            assert_eq!(std::fs::read(&source).unwrap(), source_before);
+            assert_eq!(std::fs::read(&first).unwrap(), first_before);
+            assert_eq!(std::fs::read(&later).unwrap(), later_before);
+            assert_eq!(
+                std::fs::metadata(&later).unwrap().permissions().mode() & 0o777,
+                0o400
+            );
+            assert_eq!(fixture.git(&fixture.shared, &["rev-parse", "main"]), main);
+            assert_eq!(
+                fixture
+                    .git(&fixture.shared, &["branch", "--show-current"])
+                    .trim(),
+                "share/cache"
+            );
+            assert!(!fixture
+                .git(&fixture.shared, &["branch", "--list", "share/cache"])
+                .is_empty());
+            assert_eq!(
+                fixture
+                    .git(
+                        &fixture.shared,
+                        &["show", "share/cache:Knowledge/Architecture/cache.md"]
+                    )
+                    .as_bytes(),
+                std::fs::read(&receipt).unwrap()
+            );
+            assert_eq!(fixture.git(&fixture.shared, &["status", "--porcelain"]), "");
+            let shared_head = fixture.git(&fixture.shared, &["rev-parse", "HEAD"]);
+            for _ in 0..2 {
+                fixture
+                    .share("Inbox/cache.md", &extra)
+                    .failure()
+                    .stderr(predicate::str::contains("already exists"));
+                assert_eq!(
+                    fixture.git(&fixture.shared, &["rev-parse", "HEAD"]),
+                    shared_head
+                );
+                assert_eq!(
+                    std::fs::read(&promotion).unwrap(),
+                    std::fs::read(&receipt).unwrap()
+                );
+                assert_eq!(
+                    std::fs::metadata(&promotion).unwrap().permissions().mode() & 0o777,
+                    mode
+                );
+                assert_eq!(std::fs::read(&source).unwrap(), source_before);
+                assert_eq!(std::fs::read(&first).unwrap(), first_before);
+                assert_eq!(std::fs::read(&later).unwrap(), later_before);
+            }
+        }
+    }
+}
+
 #[test]
 fn without_confirmation_it_prints_the_plan_and_writes_nothing() {
     let fixture = Fixture::new();
