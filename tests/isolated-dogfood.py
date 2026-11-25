@@ -210,33 +210,6 @@ def main():
     tracked = git('vault-tracked', ['ls-files'], VAULT)
     check('vault snapshot excludes Team', not any(x == 'Team' or x.startswith('Team/') for x in tracked.splitlines()))
     check('vault has no production remote', git('vault-remotes', ['remote', '-v'], VAULT) == '')
-    project = REPOS / 'sample-app'
-    for tool in ['opencode', 'copilot', 'claude', 'codex']:
-        run(tool + '-version', [tool, '--version'])
-    listing, code = run('opencode-roles', ['strace', '-f', '-qq', '-e', 'trace=openat,newfstatat,statx', '-o', E / 'opencode-roles.trace', 'opencode', 'agent', 'list'], cwd=project, expected=None)
-    observe('real OpenCode role discovery', code == 0 and 'ex-code-reviewer' in listing, 'opencode agent list; no model call')
-    skills, code = run('opencode-skills', ['strace', '-f', '-qq', '-e', 'trace=openat,newfstatat,statx', '-o', E / 'opencode-skills.trace', 'opencode', 'debug', 'skill'], cwd=project, expected=None)
-    observe('real OpenCode skill discovery', code == 0 and 'demo-skill' in skills, 'opencode debug skill; no model call')
-    resolved, code = run('opencode-config', ['opencode', 'debug', 'config'], cwd=project, expected=None)
-    observe('real OpenCode instruction configuration', code == 0 and str(SHARED / 'AGENTS.md') in resolved and str(VAULT / 'AGENTS.md') in resolved and '~/owner-rules.md' in resolved)
-    generated_env, _ = run('generated-shell-environment', ['bash', '--noprofile', '--norc', '-c', '. "$HOME/.config/agent-home/config.env"; env -0'])
-    cop_env = dict(x.split('=',1) for x in generated_env.split('\0') if '=' in x)
-    check('product exports exact Copilot directories', cop_env.get('COPILOT_CUSTOM_INSTRUCTIONS_DIRS') == str(SHARED) + ',' + str(VAULT))
-    prompt, code = run('codex-prompt-input', ['strace', '-f', '-qq', '-e', 'trace=openat,newfstatat,statx', '-o', E / 'codex-prompt.trace', 'codex', 'debug', 'prompt-input'], cwd=project, expected=None)
-    observe('Codex owner instructions consumed', code == 0 and 'Preserve CRLF and no final newline' in prompt)
-    observe('Codex installed shared skill discovery', code == 0 and 'demo-skill' in prompt)
-    observe('Codex shared import content expanded', code == 0 and 'SHARED-RULE-DOGFOOD-MARKER' in prompt, 'Literal @import paths alone do not establish content expansion.')
-    observe('Claude authenticated instruction/role discovery', False, 'Not attempted: --version alone does not consume rules; signed-in model use excluded.')
-    instructions, code = run('copilot-instructions', ['strace', '-f', '-qq', '-e', 'trace=openat,newfstatat,statx', '-o', E / 'copilot-instructions.trace', 'copilot', 'instruction', 'list', '--json'], cwd=project, expected=None, env=cop_env)
-    observe('real Copilot instruction discovery', code == 0 and str(SHARED / 'AGENTS.md') in instructions and str(VAULT / 'AGENTS.md') in instructions)
-    skills, code = run('copilot-skills', ['copilot', 'skill', 'list'], cwd=project, expected=None, env=cop_env)
-    observe('real Copilot skill discovery', code == 0 and 'demo-skill' in skills)
-    control = SHARED / 'dogfood-control.instructions.md'
-    put(control, '# Positive control\nCONTROL-DOGFOOD-INSTRUCTION\n')
-    controlled, code = run('copilot-positive-control', ['copilot', 'instruction', 'list', '--json'], cwd=project, expected=None, env=cop_env)
-    observe('Copilot external instruction positive control', code == 0 and 'dogfood-control.instructions.md' in controlled)
-    control.unlink()
-    check('installation and agent probes preserve shared content', snapshot(SHARED) == shared_before)
     note = VAULT / 'Inbox/cache.md'
     put(note, '---\ntitle: Cache proposal\ncreated: 2026-11-25\nupdated: 2026-11-25\ntype: note\narea: general\ntags: [architecture]\n---\nUse [[Team/Standards/coding-standards]] for review.\n')
     put(VAULT / 'Projects/consumer.md', '---\ntitle: Consumer\ncreated: 2026-11-25\nupdated: 2026-11-25\ntype: note\narea: general\ntags: [architecture]\n---\nRead [[Inbox/cache#Heading|proposal]].\n')
@@ -304,6 +277,47 @@ def main():
     before_second_uninstall = snap('before-second-uninstall')
     run('second-uninstall', [BIN, 'uninstall'])
     check('second uninstall idempotent', before_second_uninstall == snap('after-second-uninstall'))
+    # Lifecycle completion uses a fresh VM before consumers that rewrite owner configuration.
+    run('install-for-agent-discovery', install)
+    discovery_before = snap('before-agent-discovery')
+    project = REPOS / 'sample-app'
+    for tool in ['opencode', 'copilot', 'claude', 'codex']:
+        run(tool + '-version', [tool, '--version'])
+    listing, code = run('opencode-roles', ['strace', '-f', '-qq', '-e', 'trace=openat,newfstatat,statx', '-o', E / 'opencode-roles.trace', 'opencode', 'agent', 'list'], cwd=project, expected=None)
+    observe('real OpenCode role discovery', code == 0 and 'ex-code-reviewer' in listing, 'opencode agent list; no model call')
+    skills, code = run('opencode-skills', ['strace', '-f', '-qq', '-e', 'trace=openat,newfstatat,statx', '-o', E / 'opencode-skills.trace', 'opencode', 'debug', 'skill'], cwd=project, expected=None)
+    observe('real OpenCode skill discovery', code == 0 and 'demo-skill' in skills, 'opencode debug skill; no model call')
+    resolved, code = run('opencode-config', ['opencode', 'debug', 'config'], cwd=project, expected=None)
+    observe('real OpenCode instruction configuration', code == 0 and str(SHARED / 'AGENTS.md') in resolved and str(VAULT / 'AGENTS.md') in resolved and '~/owner-rules.md' in resolved)
+    generated_env, _ = run('generated-shell-environment', ['bash', '--noprofile', '--norc', '-c', '. "$HOME/.config/agent-home/config.env"; env -0'])
+    cop_env = dict(x.split('=',1) for x in generated_env.split('\0') if '=' in x)
+    check('product exports exact Copilot directories', cop_env.get('COPILOT_CUSTOM_INSTRUCTIONS_DIRS') == str(SHARED) + ',' + str(VAULT))
+    prompt, code = run('codex-prompt-input', ['strace', '-f', '-qq', '-e', 'trace=openat,newfstatat,statx', '-o', E / 'codex-prompt.trace', 'codex', 'debug', 'prompt-input'], cwd=project, expected=None)
+    observe('Codex owner instructions consumed', code == 0 and 'Preserve CRLF and no final newline' in prompt)
+    observe('Codex installed shared skill discovery', code == 0 and 'demo-skill' in prompt)
+    observe('Codex shared import content expanded', code == 0 and 'SHARED-RULE-DOGFOOD-MARKER' in prompt, 'Literal @import paths alone do not establish content expansion.')
+    observe('Claude authenticated instruction/role discovery', False, 'Not attempted: --version alone does not consume rules; signed-in model use excluded.')
+    instructions, code = run('copilot-instructions', ['strace', '-f', '-qq', '-e', 'trace=openat,newfstatat,statx', '-o', E / 'copilot-instructions.trace', 'copilot', 'instruction', 'list', '--json'], cwd=project, expected=None, env=cop_env)
+    observe('real Copilot instruction discovery', code == 0 and str(SHARED / 'AGENTS.md') in instructions and str(VAULT / 'AGENTS.md') in instructions)
+    skills, code = run('copilot-skills', ['copilot', 'skill', 'list'], cwd=project, expected=None, env=cop_env)
+    observe('real Copilot skill discovery', code == 0 and 'demo-skill' in skills)
+    control = SHARED / 'dogfood-control.instructions.md'
+    put(control, '# Positive control\nCONTROL-DOGFOOD-INSTRUCTION\n')
+    controlled, code = run('copilot-positive-control', ['copilot', 'instruction', 'list', '--json'], cwd=project, expected=None, env=cop_env)
+    observe('Copilot external instruction positive control', code == 0 and 'dogfood-control.instructions.md' in controlled)
+    control.unlink()
+    check('installation and agent probes preserve shared content', snapshot(SHARED) == shared_before)
+    discovery_after = snap('after-agent-discovery')
+    changed = {k: {'before': discovery_before.get(k), 'after': discovery_after.get(k)} for k in sorted(set(discovery_before)|set(discovery_after)) if discovery_before.get(k) != discovery_after.get(k)}
+    (E / 'agent-discovery-changes.json').write_text(json.dumps(changed, indent=2))
+    observed_config = HOME / '.config/opencode/opencode.json'
+    shutil.copy2(observed_config, E / 'opencode-owner-config-after-probes.json')
+    original_managed = discovery_before['.config/opencode/opencode.json']['sha256']
+    product_check('OpenCode probes leave managed config compatible with later relink', digest(observed_config) == original_managed, 'Consumer changed owner config; subsequent mutation is not attempted in this discovery profile.')
+    for x in rows:
+        if x['name'] == 'real OpenCode role discovery' and x['status'] == 'UNVERIFIED':
+            product_check('installed OpenCode role accepted by pinned consumer', False, (E / 'opencode-roles.log').read_text())
+            break
     check('fixed product source unchanged', source_before == snap('source-after', SOURCE))
     snap('final-home')
     archive = E / 'disposable-home.tar.gz'
@@ -322,4 +336,6 @@ except BaseException as error:
     save()
     sys.exit(1)
 finally:
+    if not (E / 'disposable-home.tar.gz').exists():
+        subprocess.run(['tar','-czf',str(E / 'partial-disposable-home.tar.gz'),'--exclude=.npm-global','--exclude=.cache','--exclude=.local/share','-C',str(HOME),'.'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     (E / 'evidence-sha256.json').write_text(json.dumps({str(p.relative_to(E)):digest(p) for p in sorted(E.rglob('*')) if p.is_file() and p.name != 'evidence-sha256.json'}, indent=2))
