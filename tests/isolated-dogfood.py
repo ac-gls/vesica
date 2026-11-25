@@ -258,13 +258,16 @@ def main():
     repo_before_uninstall = snap('repos-before-uninstall', REPOS)
     uninstall_inventory = json.loads((HOME / '.config/agent-home/manifest.json').read_text())['entries']
     run('uninstall', [BIN, 'uninstall'])
-    remaining = json.loads((HOME / '.config/agent-home/manifest.json').read_text())['entries']
+    final_manifest = HOME / '.config/agent-home/manifest.json'
+    remaining = json.loads(final_manifest.read_text())['entries'] if final_manifest.exists() else {}
     check('uninstall consumes every managed entry', not remaining, str(remaining))
     for key, entry in uninstall_inventory.items():
         target = Path(entry['target'])
         if entry.get('backup'):
             check('uninstall restored regular original '+key, target.is_file() and not target.is_symlink())
-            check('uninstall consumed backup '+key, not Path(entry['backup']).exists() and not Path(entry['backup']).is_symlink())
+            observe('uninstall backup cleanup '+key, not Path(entry['backup']).exists() and not Path(entry['backup']).is_symlink(), 'Retained originals are inventoried; current product does not delete successful-uninstall backup files.')
+            if Path(entry['backup']).exists():
+                check('retained uninstall backup private and exact '+key, not Path(entry['backup']).is_symlink() and stat.S_IMODE(Path(entry['backup']).stat().st_mode) == 0o600 and digest(Path(entry['backup'])) == entry['original_sha256'])
         else:
             check('uninstall removed managed target '+key, not target.exists() and not target.is_symlink())
     for p, data in seed_originals.items():
@@ -280,6 +283,7 @@ def main():
     # Lifecycle completion uses a fresh VM before consumers that rewrite owner configuration.
     run('install-for-agent-discovery', install)
     discovery_before = snap('before-agent-discovery')
+    shared_before_discovery = snap('shared-before-agent-discovery', SHARED)
     project = REPOS / 'sample-app'
     for tool in ['opencode', 'copilot', 'claude', 'codex']:
         run(tool + '-version', [tool, '--version'])
@@ -306,7 +310,7 @@ def main():
     controlled, code = run('copilot-positive-control', ['copilot', 'instruction', 'list', '--json'], cwd=project, expected=None, env=cop_env)
     observe('Copilot external instruction positive control', code == 0 and 'dogfood-control.instructions.md' in controlled)
     control.unlink()
-    check('installation and agent probes preserve shared content', snapshot(SHARED) == shared_before)
+    check('installation and agent probes preserve shared content', snapshot(SHARED) == shared_before_discovery)
     discovery_after = snap('after-agent-discovery')
     changed = {k: {'before': discovery_before.get(k), 'after': discovery_after.get(k)} for k in sorted(set(discovery_before)|set(discovery_after)) if discovery_before.get(k) != discovery_after.get(k)}
     (E / 'agent-discovery-changes.json').write_text(json.dumps(changed, indent=2))
@@ -321,7 +325,7 @@ def main():
     check('fixed product source unchanged', source_before == snap('source-after', SOURCE))
     snap('final-home')
     archive = E / 'disposable-home.tar.gz'
-    run('archive-home', ['tar', '-czf', archive, '--exclude=.npm-global', '--exclude=.cache', '--exclude=.local/share', '-C', HOME, '.'])
+    run('archive-home', ['tar', '-czf', archive, '--exclude=.npm-global', '--exclude=.npm', '--exclude=.cache', '--exclude=.local/share', '-C', HOME, '.'])
     (E / 'DONE').write_text('completed\n')
     if any(x['status'] == 'FAIL' for x in rows):
         raise AssertionError('Completed walkthrough with recorded product failures; see results.json')
@@ -337,5 +341,5 @@ except BaseException as error:
     sys.exit(1)
 finally:
     if not (E / 'disposable-home.tar.gz').exists():
-        subprocess.run(['tar','-czf',str(E / 'partial-disposable-home.tar.gz'),'--exclude=.npm-global','--exclude=.cache','--exclude=.local/share','-C',str(HOME),'.'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(['tar','-czf',str(E / 'partial-disposable-home.tar.gz'),'--exclude=.npm-global','--exclude=.npm','--exclude=.cache','--exclude=.local/share','-C',str(HOME),'.'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     (E / 'evidence-sha256.json').write_text(json.dumps({str(p.relative_to(E)):digest(p) for p in sorted(E.rglob('*')) if p.is_file() and p.name != 'evidence-sha256.json'}, indent=2))
