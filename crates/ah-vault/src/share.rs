@@ -325,6 +325,60 @@ struct PersonalWrite {
     permissions: std::fs::Permissions,
 }
 
+/// Prepare and remove an exclusive empty private sibling before branch/content mutation.
+/// This observes current directory access, not future access or race-proof ownership.
+fn preflight_parent(path: &Path) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("target has no parent"))?;
+    loop {
+        let temporary = parent.join(format!(
+            ".vesica-share-preflight-{}-{}.tmp",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = match options.open(&temporary) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let original = file.metadata()?;
+        let result = file.sync_all();
+        drop(file);
+        // Never remove a replacement node to hide a failed preflight.
+        let metadata = std::fs::symlink_metadata(&temporary)?;
+        #[cfg(unix)]
+        let same_node = {
+            use std::os::unix::fs::MetadataExt;
+            metadata.dev() == original.dev() && metadata.ino() == original.ino()
+        };
+        #[cfg(not(unix))]
+        let same_node = true;
+        if !same_node
+            || !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() != 0
+            || metadata.permissions() != original.permissions()
+        {
+            return Err(std::io::Error::other(format!(
+                "preflight staging changed; preserving {}",
+                temporary.display()
+            )));
+        }
+        std::fs::remove_file(temporary)?;
+        return result;
+    }
+}
+
 /// Replace a real regular file through an exclusive private sibling, retaining its mode.
 fn atomic_replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
@@ -796,13 +850,55 @@ where
     let source_path = validate_personal_file(&vault, &shared, Path::new(&plan.source_rel))?;
     let source_bytes = std::fs::read(&source_path)?;
     let source_permissions = std::fs::symlink_metadata(&source_path)?.permissions();
+    // Capture the entire rewrite set before any shared mutation. For repeated targets,
+    // model each preceding planned write so revalidation accepts only our own post-state.
+    let mut prepared_writes = Vec::new();
+    let mut planned_text = std::collections::HashMap::<PathBuf, String>::new();
     for rewrite in &plan.rewrites {
         let path = validate_personal_file(&vault, &shared, Path::new(&rewrite.file))?;
-        std::fs::read_to_string(&path)
-            .with_context(|| format!("cannot preflight rewrite {}", path.display()))?;
+        let text = match planned_text.get(&path) {
+            Some(text) => text.clone(),
+            None => std::fs::read_to_string(&path)
+                .with_context(|| format!("cannot preflight rewrite {}", path.display()))?,
+        };
+        let updated = text
+            .replace(
+                &format!("[[{}]]", rewrite.from),
+                &format!("[[{}]]", rewrite.to),
+            )
+            .replace(
+                &format!("[[{}|", rewrite.from),
+                &format!("[[{}|", rewrite.to),
+            )
+            .replace(
+                &format!("[[{}#", rewrite.from),
+                &format!("[[{}#", rewrite.to),
+            );
+        if updated != text {
+            planned_text.insert(path.clone(), updated.clone());
+            prepared_writes.push(PersonalWrite {
+                permissions: std::fs::symlink_metadata(&path)?.permissions(),
+                path,
+                original: text.into_bytes(),
+                rewritten: updated.into_bytes(),
+            });
+        }
+    }
+    let mut parents = std::collections::HashSet::new();
+    for write in &prepared_writes {
+        if parents.insert(write.path.parent().unwrap().to_path_buf()) {
+            preflight_parent(&write.path)
+                .with_context(|| format!("cannot preflight rewrite {}", write.path.display()))?;
+        }
+    }
+    if move_source && parents.insert(source_path.parent().unwrap().to_path_buf()) {
+        preflight_parent(&source_path).with_context(|| {
+            format!("cannot preflight source removal {}", source_path.display())
+        })?;
     }
     let mut personal_writes: Vec<PersonalWrite> = Vec::new();
     let mut destination_written = false;
+    let mut destination_permissions = None;
     let promoted = promoted_content(request, plan).into_bytes();
     let original = git::isolated(&shared, &["rev-parse", "--abbrev-ref", "HEAD"])?
         .trim()
@@ -820,6 +916,9 @@ where
             .create_new(true)
             .open(&destination)?;
         destination_written = true;
+        // Record the created inode's mode before any Git hook can edit the promotion.
+        // If capture fails, absence of verified ownership must refuse cleanup.
+        destination_permissions = Some(file.metadata()?.permissions());
         file.write_all(&promoted)?;
         file.sync_all()?;
 
@@ -853,33 +952,21 @@ where
             .to_owned();
 
         let mut rewrites_applied = 0_usize;
-        for rewrite in &plan.rewrites {
-            let path = validate_personal_file(&vault, &shared, Path::new(&rewrite.file))?;
-            let text = std::fs::read_to_string(&path)?;
-            let updated = text
-                .replace(
-                    &format!("[[{}]]", rewrite.from),
-                    &format!("[[{}]]", rewrite.to),
-                )
-                .replace(
-                    &format!("[[{}|", rewrite.from),
-                    &format!("[[{}|", rewrite.to),
-                )
-                .replace(
-                    &format!("[[{}#", rewrite.from),
-                    &format!("[[{}#", rewrite.to),
+        for write in prepared_writes {
+            let relative = write.path.strip_prefix(&vault)?;
+            let path = validate_personal_file(&vault, &shared, relative)?;
+            if std::fs::read(&path)? != write.original
+                || std::fs::symlink_metadata(&path)?.permissions() != write.permissions
+            {
+                anyhow::bail!(
+                    "rewrite changed after preflight; preserving current file: {}",
+                    path.display()
                 );
-            if updated != text {
-                let updated = updated.into_bytes();
-                personal_writes.push(PersonalWrite {
-                    path: path.clone(),
-                    original: text.into_bytes(),
-                    rewritten: updated.clone(),
-                    permissions: std::fs::symlink_metadata(&path)?.permissions(),
-                });
-                write_personal(&path, &updated)?;
-                rewrites_applied += 1;
             }
+            let updated = write.rewritten.clone();
+            personal_writes.push(write);
+            write_personal(&path, &updated)?;
+            rewrites_applied += 1;
         }
 
         let mut moved = false;
@@ -949,6 +1036,7 @@ where
                     let metadata = std::fs::symlink_metadata(&path)?;
                     Ok(metadata.is_file()
                         && !metadata.file_type().is_symlink()
+                        && destination_permissions.as_ref() == Some(&metadata.permissions())
                         && std::fs::read(&path)? == promoted)
                 })
                 .unwrap_or(false);
@@ -970,7 +1058,7 @@ where
                 Err(cleanup) => rollback_errors.push(format!("{cleanup:#}")),
             }
         } else {
-            rollback_errors.push(format!("destination cleanup refused: {} changed type or contents; preserving current state and share branch", destination.display()));
+            rollback_errors.push(format!("destination cleanup refused: {} changed type, contents or permissions; preserving current state and share branch", destination.display()));
         }
         if rollback_errors.is_empty() {
             return Err(error);
@@ -1396,6 +1484,286 @@ mod tests {
             assert_eq!(git(&fixture.shared, ["branch", "--show-current"]), "main");
             assert!(git(&fixture.shared, ["branch", "--list", &planned.branch]).is_empty());
             assert!(!fixture.shared.join(&planned.destination_rel).exists());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rewrite_parent_preflight_failure_leaves_shared_git_and_personal_tree_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+        const CHILD: &str = "VESICA_REWRITE_PARENT_PREFLIGHT_CASE";
+        if std::env::var_os(CHILD).is_none() {
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["share::tests::rewrite_parent_preflight_failure_leaves_shared_git_and_personal_tree_untouched", "--exact", "--nocapture"])
+                .env(CHILD, "1");
+            if Command::new("id").arg("-u").output().unwrap().stdout == b"0\n" {
+                use std::os::unix::process::CommandExt;
+                // Mounted worktrees may have private ancestors. Copy only this synthetic
+                // test executable into an accessible exec-capable directory, never chmod
+                // the developer's home to let an unprivileged child traverse it.
+                let execution_root = std::env::var_os("VESICA_TEST_UNPRIV_EXEC_ROOT")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(std::env::temp_dir);
+                let executable = tempfile::tempdir_in(execution_root).unwrap();
+                std::fs::set_permissions(executable.path(), std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+                let binary = executable.path().join("test-binary");
+                std::fs::copy(std::env::current_exe().unwrap(), &binary).unwrap();
+                std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+                child = Command::new(binary);
+                child
+                    .args(["share::tests::rewrite_parent_preflight_failure_leaves_shared_git_and_personal_tree_untouched", "--exact", "--nocapture"])
+                    .env(CHILD, "1")
+                    .uid(65534).gid(65534).env("TMPDIR", "/tmp")
+                    .current_dir(executable.path());
+                let output = child.output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                return;
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        // Use a real non-writable parent; the parent test is rerun as an unprivileged UID
+        // in verification, so this is not a root-skipped permission assertion.
+        let fixture = Fixture::new();
+        let request = fixture.request();
+        let planned = plan(&request).unwrap();
+        let parent = fixture.vault.join("Inbox");
+        let head = git(&fixture.shared, ["rev-parse", "HEAD"]);
+        let reflog = std::fs::read(fixture.shared.join(".git/logs/HEAD")).unwrap();
+        let index = std::fs::read(fixture.shared.join(".git/index")).unwrap();
+        let source = std::fs::read(&fixture.note).unwrap();
+        let first = std::fs::read(parent.join("a.md")).unwrap();
+        let last = std::fs::read(parent.join("z.md")).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = super::apply(&request, &planned, "share", true);
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let error = format!("{:#}", result.unwrap_err());
+        assert!(error.contains("cannot preflight rewrite"), "{error}");
+        assert!(error.contains("Permission denied"), "{error}");
+        assert_eq!(
+            std::fs::read(fixture.shared.join(".git/logs/HEAD")).unwrap(),
+            reflog,
+            "shared branch was created before writable-target preflight"
+        );
+        assert_eq!(
+            std::fs::read(fixture.shared.join(".git/index")).unwrap(),
+            index
+        );
+        assert_eq!(git(&fixture.shared, ["rev-parse", "HEAD"]), head);
+        assert_eq!(std::fs::read(&fixture.note).unwrap(), source);
+        assert_eq!(std::fs::read(parent.join("a.md")).unwrap(), first);
+        assert_eq!(std::fs::read(parent.join("z.md")).unwrap(), last);
+        assert!(!fixture.shared.join(&planned.destination_rel).exists());
+        assert!(git(&fixture.shared, ["branch", "--list", &planned.branch]).is_empty());
+        assert_eq!(std::fs::read_dir(&parent).unwrap().count(), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rewrite_snapshots_refuse_intervening_later_bytes_and_modes() {
+        use std::os::unix::fs::PermissionsExt;
+        for case in ["bytes", "mode", "symlink"] {
+            let fixture = Fixture::new();
+            let first = fixture.vault.join("Inbox/a.md");
+            let last = fixture.vault.join("Inbox/z.md");
+            let first_before = std::fs::read(&first).unwrap();
+            let last_before = std::fs::read(&last).unwrap();
+            let source_before = std::fs::read(&fixture.note).unwrap();
+            let outside = fixture._temp.path().join("outside");
+            std::fs::write(&outside, &last_before).unwrap();
+            let head = git(&fixture.shared, ["rev-parse", "HEAD"]);
+            let index = git(&fixture.shared, ["ls-files", "--stage"]);
+            let request = fixture.request();
+            let planned = plan(&request).unwrap();
+            let mut writes = 0;
+            let result = apply_impl(&request, &planned, "share", true, |path, bytes| {
+                writes += 1;
+                super::atomic_replace(path, bytes)?;
+                if writes == 1 {
+                    match case {
+                        "bytes" => std::fs::write(&last, "User edit [[note]].\n").unwrap(),
+                        "mode" => {
+                            std::fs::set_permissions(&last, std::fs::Permissions::from_mode(0o400))
+                                .unwrap()
+                        }
+                        "symlink" => {
+                            std::fs::remove_file(&last).unwrap();
+                            std::os::unix::fs::symlink(&outside, &last).unwrap();
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                Ok(())
+            });
+            let error =
+                result.expect_err("share overwrote a later user's edit instead of refusing");
+            assert!(format!("{error:#}").contains(if case == "symlink" {
+                "not a real regular file"
+            } else {
+                "rewrite changed after preflight"
+            }));
+            assert_eq!(writes, 1);
+            assert_eq!(std::fs::read(&first).unwrap(), first_before);
+            if case == "bytes" {
+                assert_eq!(std::fs::read(&last).unwrap(), b"User edit [[note]].\n");
+            } else if case == "mode" {
+                assert_eq!(std::fs::read(&last).unwrap(), last_before);
+                assert_eq!(
+                    std::fs::metadata(&last).unwrap().permissions().mode() & 0o777,
+                    0o400
+                );
+            } else {
+                assert!(std::fs::symlink_metadata(&last)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink());
+                assert_eq!(std::fs::read_link(&last).unwrap(), outside);
+            }
+            assert_eq!(std::fs::read(&outside).unwrap(), last_before);
+            assert_eq!(std::fs::read(&fixture.note).unwrap(), source_before);
+            assert_eq!(git(&fixture.shared, ["rev-parse", "HEAD"]), head);
+            assert_eq!(git(&fixture.shared, ["ls-files", "--stage"]), index);
+            assert_eq!(git(&fixture.shared, ["branch", "--show-current"]), "main");
+            assert!(git(&fixture.shared, ["status", "--porcelain"]).is_empty());
+            assert!(git(&fixture.shared, ["branch", "--list", &planned.branch]).is_empty());
+            assert!(!fixture.shared.join(&planned.destination_rel).exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repeated_failed_share_recovery_restores_same_plan_then_allows_retry() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new();
+        let request = fixture.request();
+        let planned = plan(&request).unwrap();
+        let mut paths = vec![
+            fixture.note.clone(),
+            fixture.vault.join("Inbox/a.md"),
+            fixture.vault.join("Inbox/z.md"),
+        ];
+        for (i, path) in paths.iter().enumerate() {
+            std::fs::set_permissions(
+                path,
+                std::fs::Permissions::from_mode(if i == 1 { 0o640 } else { 0o600 }),
+            )
+            .unwrap();
+        }
+        let before: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                (
+                    std::fs::read(path).unwrap(),
+                    std::fs::symlink_metadata(path).unwrap().permissions(),
+                )
+            })
+            .collect();
+        let head = git(&fixture.shared, ["rev-parse", "HEAD"]);
+        let index = git(&fixture.shared, ["ls-files", "--stage"]);
+        for attempt in 1..=3 {
+            let mut writes = 0;
+            let error = apply_impl(&request, &planned, "share", true, |path, bytes| {
+                writes += 1;
+                if writes == 2 {
+                    return Err(std::io::Error::other("repeat recovery failure"));
+                }
+                super::atomic_replace(path, bytes)
+            })
+            .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("repeat recovery failure"),
+                "attempt {attempt}"
+            );
+            assert_eq!(writes, 2);
+            for (path, (bytes, mode)) in paths.iter().zip(&before) {
+                assert_eq!(&std::fs::read(path).unwrap(), bytes);
+                let metadata = std::fs::symlink_metadata(path).unwrap();
+                assert!(metadata.is_file() && !metadata.file_type().is_symlink());
+                assert_eq!(&metadata.permissions(), mode);
+            }
+            assert_eq!(
+                std::fs::read_dir(fixture.vault.join("Inbox"))
+                    .unwrap()
+                    .count(),
+                3
+            );
+            assert_eq!(git(&fixture.shared, ["rev-parse", "HEAD"]), head);
+            assert_eq!(git(&fixture.shared, ["ls-files", "--stage"]), index);
+            assert_eq!(git(&fixture.shared, ["branch", "--show-current"]), "main");
+            assert!(git(&fixture.shared, ["status", "--porcelain"]).is_empty());
+            assert!(git(&fixture.shared, ["branch", "--list", &planned.branch]).is_empty());
+            assert!(!fixture.shared.join(&planned.destination_rel).exists());
+        }
+        assert!(
+            super::apply(&request, &planned, "retry", true)
+                .unwrap()
+                .moved
+        );
+        assert!(!fixture.note.exists());
+        paths.remove(0);
+        for path in paths {
+            assert!(std::fs::read_to_string(path)
+                .unwrap()
+                .contains("[[Team/Knowledge/Architecture/note"));
+        }
+    }
+
+    #[test]
+    fn repeated_share_after_incomplete_recovery_preserves_user_edit_and_promotion() {
+        let fixture = Fixture::new();
+        let request = fixture.request();
+        let planned = plan(&request).unwrap();
+        let first = fixture.vault.join("Inbox/a.md");
+        let source = std::fs::read(&fixture.note).unwrap();
+        let mut writes = 0;
+        let error = apply_impl(&request, &planned, "share", true, |path, bytes| {
+            writes += 1;
+            if writes == 2 {
+                std::fs::write(&first, "Owner edit [[Team/Knowledge/Architecture/note]].\n")
+                    .unwrap();
+                return Err(std::io::Error::other("conflicting recovery"));
+            }
+            super::atomic_replace(path, bytes)
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("rollback incomplete"));
+        let promotion = fixture.shared.join(&planned.destination_rel);
+        let promoted = std::fs::read(&promotion).unwrap();
+        let branch = git(&fixture.shared, ["branch", "--show-current"]);
+        let head = git(&fixture.shared, ["rev-parse", "HEAD"]);
+        let index = git(&fixture.shared, ["ls-files", "--stage"]);
+        let reflog = std::fs::read(fixture.shared.join(".git/logs/HEAD")).unwrap();
+        let personal = std::fs::read(&first).unwrap();
+        for _ in 0..3 {
+            let retry = super::apply(&request, &planned, "retry", true).unwrap_err();
+            assert!(format!("{retry:#}").contains("share destination already exists"));
+            assert_eq!(std::fs::read(&first).unwrap(), personal);
+            assert_eq!(std::fs::read(&fixture.note).unwrap(), source);
+            assert_eq!(std::fs::read(&promotion).unwrap(), promoted);
+            assert_eq!(git(&fixture.shared, ["branch", "--show-current"]), branch);
+            assert_eq!(git(&fixture.shared, ["rev-parse", "HEAD"]), head);
+            assert_eq!(git(&fixture.shared, ["ls-files", "--stage"]), index);
+            assert_eq!(
+                std::fs::read(fixture.shared.join(".git/logs/HEAD")).unwrap(),
+                reflog
+            );
+            assert_eq!(
+                std::fs::read_dir(fixture.vault.join("Inbox"))
+                    .unwrap()
+                    .count(),
+                3
+            );
         }
     }
 
