@@ -31,6 +31,14 @@ pub struct SharePlan {
     pub link_rewrites: Vec<(String, String)>,
     /// Personal notes whose links into the promoted note would be rewritten.
     pub rewrites: Vec<Rewrite>,
+    /// Ambiguous personal links left unchanged; explicit candidates keep their existing precedence.
+    pub ambiguous_inbound_links: Vec<AmbiguousInboundLink>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmbiguousInboundLink {
+    pub file: String,
+    pub target: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,7 +165,8 @@ pub fn plan(request: &ShareRequest) -> Result<SharePlan> {
     if !frontmatter.iter().any(|l| l.starts_with("authority:")) {
         additions.push("authority");
     }
-    let rewrites = inbound_rewrites(&vault, &shared, &source_rel, &destination_rel)?;
+    let (rewrites, ambiguous_inbound_links) =
+        inbound_rewrites(&vault, &shared, &source_rel, &destination_rel)?;
     Ok(SharePlan {
         source_rel,
         destination_rel,
@@ -167,6 +176,7 @@ pub fn plan(request: &ShareRequest) -> Result<SharePlan> {
         content: links.content,
         link_rewrites: links.rewrites,
         rewrites,
+        ambiguous_inbound_links,
     })
 }
 
@@ -668,7 +678,7 @@ fn resolve_personal_target(
     reader: &Path,
     target: &str,
     notes: &[PathBuf],
-) -> Option<PathBuf> {
+) -> Result<Option<PathBuf>, ()> {
     let target_path = Path::new(target);
     if target_path.components().any(|component| {
         !matches!(
@@ -679,7 +689,7 @@ fn resolve_personal_target(
         .extension()
         .is_some_and(|extension| extension != "md")
     {
-        return None;
+        return Ok(None);
     }
     let with_extension = if target_path.extension().is_some() {
         target_path.to_path_buf()
@@ -705,30 +715,37 @@ fn resolve_personal_target(
                     if metadata.file_type().is_symlink()
                         || (index + 1 < components.len() && !metadata.is_dir()) =>
                 {
-                    return None;
+                    return Ok(None);
                 }
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
-                Err(_) => return None,
+                Err(_) => return Ok(None),
             }
         }
         let full = vault.join(&candidate);
         match std::fs::symlink_metadata(&full) {
-            Ok(_) => return validate_personal_file(vault, shared, &candidate).ok(),
+            Ok(_) => return Ok(validate_personal_file(vault, shared, &candidate).ok()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return None,
+            Err(_) => return Ok(None),
         }
     }
     if target_path.components().count() != 1 {
-        return None;
+        return Ok(None);
     }
-    let stem = target_path.file_stem()?;
+    let Some(stem) = target_path.file_stem() else {
+        return Ok(None);
+    };
     let mut matches = notes.iter().filter(|path| path.file_stem() == Some(stem));
-    let first = matches.next()?;
+    let Some(first) = matches.next() else {
+        return Ok(None);
+    };
     if matches.next().is_some() {
-        return None;
+        return Err(());
     }
-    validate_personal_file(vault, shared, first.strip_prefix(vault).ok()?).ok()
+    Ok(first
+        .strip_prefix(vault)
+        .ok()
+        .and_then(|relative| validate_personal_file(vault, shared, relative).ok()))
 }
 
 fn inbound_rewrites(
@@ -736,7 +753,7 @@ fn inbound_rewrites(
     shared: &Path,
     source_rel: &str,
     destination_rel: &str,
-) -> Result<Vec<Rewrite>> {
+) -> Result<(Vec<Rewrite>, Vec<AmbiguousInboundLink>)> {
     let source = validate_personal_file(vault, shared, Path::new(source_rel))?;
     let target = destination_rel.trim_end_matches(".md");
     let new_target = format!("Team/{target}");
@@ -765,6 +782,7 @@ fn inbound_rewrites(
     }
     let note_paths: Vec<_> = notes.iter().map(|(path, _)| path.clone()).collect();
     let mut rewrites = Vec::new();
+    let mut ambiguous = Vec::new();
     for (path, text) in notes {
         let relative = path.strip_prefix(vault).unwrap_or(&path);
         for link in wikilinks(&text) {
@@ -773,17 +791,23 @@ fn inbound_rewrites(
                 continue;
             }
             let resolved = resolve_personal_target(vault, shared, relative, &link, &note_paths);
-            if resolved.as_ref() == Some(&source) {
-                rewrites.push(Rewrite {
+            match resolved {
+                Ok(Some(resolved)) if resolved == source => rewrites.push(Rewrite {
                     file: relative.to_string_lossy().replace('\\', "/"),
                     from: link,
                     to: new_target.clone(),
-                });
+                }),
+                Err(()) => ambiguous.push(AmbiguousInboundLink {
+                    file: relative.to_string_lossy().replace('\\', "/"),
+                    target: link,
+                }),
+                _ => {}
             }
         }
     }
     rewrites.sort_by(|a, b| a.file.cmp(&b.file).then(a.from.cmp(&b.from)));
-    Ok(rewrites)
+    ambiguous.sort_by(|a, b| a.file.cmp(&b.file).then(a.target.cmp(&b.target)));
+    Ok((rewrites, ambiguous))
 }
 
 /// Apply a plan: branch, write, gate on lint and vault-scan, commit, rewrite, optionally move.
