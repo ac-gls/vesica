@@ -1082,3 +1082,319 @@ fn reinstall_rewrites_manifest_privately_but_preserves_managed_config_modes() {
         uninstall(&root);
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ordinary_install_stale_prune_failure_restores_machine_facts_and_all_links() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::process::CommandExt;
+    // Root must not bypass the real parent-directory denial. Copy only a disposable
+    // executable to an accessible mount; never alter the developer's home modes.
+    let exec_root = std::env::var_os("VESICA_TEST_UNPRIV_EXEC_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let executable = tempfile::tempdir_in(exec_root).unwrap();
+    std::fs::set_permissions(executable.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let binary = executable.path().join("vesica");
+    std::fs::copy(assert_cmd::cargo::cargo_bin("vesica"), &binary).unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let root_run = std::fs::metadata("/proc/self").unwrap().uid() == 0;
+    for present in [true, false] {
+        let tmp = tempfile::tempdir_in(executable.path()).unwrap();
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let home = tmp.path().join("home");
+        let shared = tmp.path().join("shared");
+        fn copy_tree(source: &Path, target: &Path) {
+            std::fs::create_dir_all(target).unwrap();
+            for entry in std::fs::read_dir(source).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    copy_tree(&entry.path(), &target.join(entry.file_name()));
+                } else {
+                    std::fs::copy(entry.path(), target.join(entry.file_name())).unwrap();
+                }
+            }
+        }
+        copy_tree(&fixture(), &shared);
+        std::fs::create_dir(&home).unwrap();
+        if root_run {
+            // The fixture contains no links yet, so chown cannot touch outside nodes.
+            let status = std::process::Command::new("chown")
+                .args(["-R", "65534:65534"])
+                .arg(&home)
+                .arg(&shared)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        let run = |extra: &[&str]| {
+            let mut cmd = std::process::Command::new(&binary);
+            cmd.current_dir(tmp.path())
+                .env("HOME", &home)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_TERMINAL_PROMPT", "0");
+            for (key, _) in std::env::vars_os() {
+                let text = key.to_string_lossy();
+                if text.starts_with("VESICA_")
+                    || text.starts_with("AGENT_HOME_")
+                    || text.starts_with("GIT_")
+                    || ["GH_TOKEN", "GITHUB_TOKEN", "ADO_PAT"].contains(&text.as_ref())
+                {
+                    cmd.env_remove(key);
+                }
+            }
+            cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .args(["install", "--root"])
+                .arg(&home)
+                .arg("--home-repo")
+                .arg(&shared)
+                .args(["--profile", "core"])
+                .args(extra);
+            if root_run {
+                cmd.uid(65534).gid(65534);
+            }
+            cmd.output().unwrap()
+        };
+        let first = run(&[]);
+        assert!(
+            first.status.success(),
+            "setup CLI must execute: {}",
+            String::from_utf8_lossy(&first.stderr)
+        );
+        let cfg = home.join(".config/agent-home");
+        let local = cfg.join("config.toml");
+        if present {
+            std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o640)).unwrap();
+        } else {
+            std::fs::remove_file(&local).unwrap();
+        }
+        std::fs::remove_dir_all(shared.join("Agents/Skills/demo-skill")).unwrap();
+        let earlier = home.join(".agents/skills/demo-skill");
+        let later = home.join(".claude/skills/demo-skill");
+        assert!(earlier.is_symlink() && later.is_symlink());
+        assert_eq!(
+            manifest(&home)["entries"][earlier.to_str().unwrap()]["kind"],
+            "symlink"
+        );
+        assert_eq!(
+            manifest(&home)["entries"][later.to_str().unwrap()]["kind"],
+            "symlink"
+        );
+        let parent = later.parent().unwrap();
+        let old_mode = std::fs::metadata(parent).unwrap().permissions();
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let before = tree_snapshot(tmp.path());
+        let new_repos = tmp.path().join("new-repos");
+        let failed = run(&["--repos-dir", new_repos.to_str().unwrap()]);
+        let diagnostic = String::from_utf8_lossy(&failed.stderr);
+        let after = tree_snapshot(tmp.path());
+        // Restore fixture access before any assertion can panic and cleanup runs.
+        std::fs::set_permissions(parent, old_mode).unwrap();
+        assert_eq!(failed.status.code(), Some(1), "{diagnostic}");
+        assert!(
+            diagnostic.contains("Permission denied"),
+            "must reach real prune failure: {diagnostic}"
+        );
+        let local_key = PathBuf::from("home/.config/agent-home/config.toml");
+        assert_eq!(
+            after.get(&local_key),
+            before.get(&local_key),
+            "failed ordinary install persisted machine facts; present={present}"
+        );
+        assert_eq!(after, before, "failed ordinary install must restore all managed links/files/modes and manifest; present={present}");
+        let retry = run(&["--repos-dir", new_repos.to_str().unwrap()]);
+        assert!(
+            retry.status.success(),
+            "retry: {}",
+            String::from_utf8_lossy(&retry.stderr)
+        );
+        assert!(!earlier.is_symlink() && !later.is_symlink());
+        let recorded = manifest(&home);
+        assert!(recorded["entries"].get(earlier.to_str().unwrap()).is_none());
+        assert!(recorded["entries"].get(later.to_str().unwrap()).is_none());
+        assert!(std::fs::read_to_string(local)
+            .unwrap()
+            .contains(new_repos.to_str().unwrap()));
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn generated_file_returned_write_error_leaves_no_partial_target_and_allows_retry() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::process::CommandExt;
+    let exec_root = std::env::var_os("VESICA_TEST_UNPRIV_EXEC_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let executable = tempfile::tempdir_in(exec_root).unwrap();
+    std::fs::set_permissions(executable.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let binary = executable.path().join("vesica");
+    std::fs::copy(assert_cmd::cargo::cargo_bin("vesica"), &binary).unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let root_run = std::fs::metadata("/proc/self").unwrap().uid() == 0;
+    fn copy_tree(source: &Path, target: &Path) {
+        std::fs::create_dir_all(target).unwrap();
+        for entry in std::fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &target.join(entry.file_name()));
+            } else {
+                std::fs::copy(entry.path(), target.join(entry.file_name())).unwrap();
+            }
+        }
+    }
+    let mut failures = Vec::new();
+    for boundary in ["fresh", "stale-reinstall", "updater-relink"] {
+        let tmp = tempfile::tempdir_in(executable.path()).unwrap();
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let home = tmp.path().join("home");
+        let shared = tmp.path().join("shared");
+        std::fs::create_dir(&home).unwrap();
+        copy_tree(&fixture(), &shared);
+        let own = || {
+            if root_run {
+                assert!(std::process::Command::new("chown")
+                    .arg("65534:65534")
+                    .arg(tmp.path())
+                    .status()
+                    .unwrap()
+                    .success());
+                assert!(std::process::Command::new("chown")
+                    .args(["-R", "65534:65534"])
+                    .arg(&home)
+                    .arg(&shared)
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+        };
+        own();
+        let run = |limited: bool, relink: bool| {
+            // Ignore SIGXFSZ so a real short write is followed by synchronous EFBIG,
+            // not process termination. The limit affects only this exec'd child.
+            let mut cmd = if limited {
+                let mut c = std::process::Command::new("python3");
+                c.args(["-c", "import os,resource,signal,sys; signal.signal(signal.SIGXFSZ,signal.SIG_IGN); resource.setrlimit(resource.RLIMIT_FSIZE,(65536,65536)); os.execv(sys.argv[1],sys.argv[1:])"]).arg(&binary);
+                c
+            } else {
+                std::process::Command::new(&binary)
+            };
+            for (key, _) in std::env::vars_os() {
+                let name = key.to_string_lossy();
+                if name.starts_with("GIT_")
+                    || name.starts_with("VESICA_")
+                    || name.starts_with("AGENT_HOME_")
+                    || ["GH_TOKEN", "GITHUB_TOKEN", "ADO_PAT"].contains(&name.as_ref())
+                {
+                    cmd.env_remove(key);
+                }
+            }
+            cmd.env("HOME", &home)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .current_dir(tmp.path());
+            if relink {
+                cmd.args(["__update-relink", "--root"])
+                    .arg(&home)
+                    .arg("--shared-home")
+                    .arg(&shared)
+                    .args(["--profile", "core", "--recovery-path"])
+                    .arg(tmp.path().join("transaction.json"));
+            } else {
+                cmd.args(["install", "--root"])
+                    .arg(&home)
+                    .arg("--home-repo")
+                    .arg(&shared)
+                    .args(["--profile", "core"]);
+            }
+            if root_run {
+                cmd.uid(65534).gid(65534);
+            }
+            cmd.output().unwrap()
+        };
+        let role = if boundary == "fresh" {
+            "code-reviewer"
+        } else {
+            let first = run(false, false);
+            assert!(
+                first.status.success(),
+                "setup CLI: {}",
+                String::from_utf8_lossy(&first.stderr)
+            );
+            std::fs::set_permissions(
+                home.join(".config/agent-home/config.toml"),
+                std::fs::Permissions::from_mode(0o640),
+            )
+            .unwrap();
+            std::fs::remove_dir_all(shared.join("Agents/Skills/demo-skill")).unwrap();
+            "partial-role"
+        };
+        let large_role = std::fs::read_to_string(shared.join("Agents/Roles/code-reviewer.md"))
+            .unwrap()
+            .replace("name: code-reviewer", &format!("name: {role}"))
+            + &"\nOrdinary fixture prose.\n".repeat(10000);
+        std::fs::write(shared.join(format!("Agents/Roles/{role}.md")), large_role).unwrap();
+        own();
+        let target = home.join(format!(".config/opencode/agents/ex-{role}.md"));
+        assert!(!target.exists());
+        let before = tree_snapshot(&home);
+        let failed = run(true, boundary == "updater-relink");
+        let diagnostic = String::from_utf8_lossy(&failed.stderr);
+        assert_eq!(failed.status.code(), Some(1), "{boundary}: {diagnostic}");
+        assert!(
+            diagnostic.contains("File too large"),
+            "{boundary} must reach EFBIG: {diagnostic}"
+        );
+        let after = tree_snapshot(&home);
+        // Existing directory modes are checked, but first-install empty state dirs
+        // are not described as unmanaged content or crash-atomic recovery.
+        for (path, node) in &before {
+            if after.get(path) != Some(node) {
+                failures.push(format!(
+                    "{boundary}: original node changed {}",
+                    path.display()
+                ));
+            }
+        }
+        for (path, node) in &after {
+            if node.0 != "directory" && before.get(path) != Some(node) {
+                failures.push(format!(
+                    "{boundary}: partial generated target or unowned artifact {} ({} bytes)",
+                    path.display(),
+                    node.1.len()
+                ));
+            }
+        }
+        if boundary == "updater-relink" {
+            let journal: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(tmp.path().join("transaction.json")).unwrap(),
+            )
+            .unwrap();
+            let change = journal["changes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["path"].as_str() == target.to_str())
+                .unwrap();
+            assert_eq!(change["before"], "Absent");
+            assert!(change["after"].is_null());
+        }
+        let retry = run(false, false);
+        if !retry.status.success() {
+            failures.push(format!(
+                "{boundary}: retry blocked: {}",
+                String::from_utf8_lossy(&retry.stderr)
+            ));
+        } else {
+            assert!(std::fs::metadata(&target).unwrap().len() > 65536);
+            assert_eq!(
+                manifest(&home)["entries"][target.to_str().unwrap()]["kind"],
+                "generated-file"
+            );
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
