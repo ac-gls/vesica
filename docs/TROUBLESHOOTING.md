@@ -387,3 +387,12 @@ or remove backups merely to bypass this guard. No automatic migration is perform
    pass its own type, backup, containment and local-config authorization checks.
    Review the plan and retained state with the owner before approving any real
    install/uninstall. No recovery was performed automatically by the diagnostic.
+
+## Ambiguous personal links during sharing
+
+Share previews and confirmed applications report ambiguous inbound basename links and leave them
+unchanged. Use a qualified path to select the intended note. Existing reader-relative and
+vault-root file/README candidates retain their precedence; only an unqualified basename with
+exactly one remaining valid Markdown match is rewritten. Matching is case-sensitive on the
+supported Linux filesystem. Aliases and heading anchors are preserved. Qualified links to other
+notes, unresolved paths, and excluded shared/repository storage are not redirected by basename.

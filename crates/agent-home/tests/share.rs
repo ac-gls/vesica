@@ -955,3 +955,63 @@ fn share_refuses_identity_redirect_before_mutation_unless_explicitly_dropped() {
         .assert()
         .success();
 }
+
+#[test]
+fn share_reports_ambiguous_inbound_links_without_redirecting_selected_identity() {
+    let fixture = Fixture::new();
+    fixture.valid_note("Projects/A/cache.md");
+    fixture.valid_note("Projects/B/cache.md");
+    let original = "A [[Projects/A/cache.md#Heading|A]]; B [[Projects/B/cache|B]]; ambiguous [[cache]] and [[cache.md#Heading|label]]; unresolved [[missing/cache]].\n";
+    let reader = fixture.note("reader.md", original);
+    let local = fixture.note("Projects/A/local.md", "Local [[cache#Heading|local]].\n");
+    let main = fixture.git(&fixture.shared, &["rev-parse", "main"]);
+    for extra in [
+        vec!["--area", "Architecture", "--dry-run"],
+        vec!["--area", "Architecture", "--yes"],
+    ] {
+        let output = fixture
+            .share("Projects/A/cache.md", &extra)
+            .success()
+            .get_output()
+            .clone();
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            text.contains("Ambiguous inbound link in reader.md: [[cache]] left unchanged"),
+            "missing ambiguity diagnostic: {text}"
+        );
+        assert!(
+            text.contains("Ambiguous inbound link in reader.md: [[cache.md]] left unchanged"),
+            "missing extension diagnostic: {text}"
+        );
+        assert_eq!(
+            text.matches("Ambiguous inbound link").count(),
+            2,
+            "resolved/unresolved paths must not be mislabeled: {text}"
+        );
+        if extra.contains(&"--dry-run") {
+            assert_eq!(std::fs::read_to_string(&reader).unwrap(), original);
+            assert_eq!(
+                std::fs::read_to_string(&local).unwrap(),
+                "Local [[cache#Heading|local]].\n"
+            );
+            assert_eq!(fixture.git(&fixture.shared, &["rev-parse", "HEAD"]), main);
+            assert_eq!(
+                fixture.git(&fixture.shared, &["branch", "--list", "share/cache"]),
+                ""
+            );
+        } else {
+            assert_eq!(
+                std::fs::read_to_string(&reader).unwrap(),
+                original.replace(
+                    "Projects/A/cache.md#Heading|A",
+                    "Team/Knowledge/Architecture/cache#Heading|A"
+                )
+            );
+            assert_eq!(
+                std::fs::read_to_string(&local).unwrap(),
+                "Local [[Team/Knowledge/Architecture/cache#Heading|local]].\n"
+            );
+            assert_eq!(fixture.git(&fixture.shared, &["rev-parse", "main"]), main);
+        }
+    }
+}

@@ -1454,6 +1454,9 @@ fn share(o: ShareOptions) -> Result<()> {
             rewrite.file, rewrite.from, rewrite.to
         );
     }
+    for link in &plan.ambiguous_inbound_links {
+        println!("  Ambiguous inbound link in {}: [[{}]] left unchanged; use a qualified path to select the intended note", link.file, link.target);
+    }
     if !confirm {
         println!(
             "Nothing was written. Re-run with --yes to apply{}.",
