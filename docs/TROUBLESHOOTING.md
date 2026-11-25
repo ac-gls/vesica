@@ -182,6 +182,68 @@ Beyond the blocker rows above:
 - **`content-guard` fails.** The public app repository must not contain team content. The rule ID (`VCG001`–`VCG005`) and the file:line tell you what to remove. Team material belongs in the private shared home.
 - **`supply-chain` fails.** A dependency has a RustSec advisory or a licence outside `deny.toml`. Prefer replacing the dependency over adding an ignore.
 
+## Install stale cleanup and returned-error recovery
+
+Ordinary install accepts machine facts and its manifest only when managed actions
+and stale symlink/generated-file cleanup have succeeded together. If a stale
+removal or subsequent manifest persistence fails, it attempts reverse restoration
+of the removed nodes plus local configuration and managed actions. Existing local
+configuration bytes and mode, or its prior absence, are restored on a fully
+recovered failure. A failed removal can therefore be retried after the owner
+resolves the original access obstruction; do not bypass it by deleting state.
+
+New generated files are written and synced in exclusive private siblings before
+no-clobber publication, so a returned short-write error does not publish a partial
+final target. Cleanup verifies the created staging node identity, type, mode and
+expected byte prefix. A replaced or edited staging node is retained with cleanup
+diagnostics rather than blindly deleted. This is guarded returned-error recovery,
+not an arbitrary-interruption or race-proof guarantee.
+
+The executor records the writer's known bytes and prepared permissions when a
+mutation succeeds, before fallible post-mutation verification. Verification
+errors stop acceptance and use that recorded state for guarded undo; owner-edited
+bytes, type or mode remain conflicts rather than being overwritten.
+
+Backup ownership remains active across every fallible acceptance step after
+creation, including manifest snapshot acquisition before local persistence. On
+returned acceptance errors, explicit ownership-aware backup finalization waits
+until executor action rollback has finished. If action or nested local/manifest
+restoration is incomplete, original backups are retained with their paths for
+owner inspection; fully restored failures clean only still-owned backups. Backup
+creation errors also transfer the incrementally recorded inventory to that outer
+owner: a later create/write/sync error must not delete earlier completed originals
+before rollback. Only the current known incomplete output is creator-cleaned;
+failed partial cleanup is retained and reported, not destructively retried by the
+outer finalizer. Fully written originals remain recovery evidence even when sync
+fails. Finalization cleanup errors are appended to the primary failure, not discarded by a silent
+destructor. Manifest entry construction must also return required backup and
+installed regular-file read errors rather than accepting missing hashes. This
+restores already-persisted local configuration through the same guarded error
+path. Empty regular files receive their valid SHA-256 hash; symlink/directory
+actions deliberately have no byte hash and do not read a referent. This does not
+add panic/crash recovery.
+
+Failed backup writes also clean up only the recorded created node: identity, type,
+mode and the known expected byte prefix must match. Completed backups require exact
+bytes before cleanup. A replacement or removal failure retains the backup and
+reports its path and cleanup error alongside the original write failure; inspect
+that artifact before owner-led retry. Successful backup writes are synced before
+transaction acceptance. Prefix-equivalent edits cannot always be distinguished
+from this writer's partial output; these guards are not atomic confinement.
+
+A stale node is revalidated against its captured type, bytes/link target and mode
+before removal. If it changed, removal refuses. If a replacement appears at an
+already-removed path before rollback, the replacement is kept and the primary
+failure includes cleanup/rollback diagnostics. Preserve the original manifest,
+backups and any updater recovery journal for owner-led inspection; a failed
+rollback is not a successful install. A bare ordinary install does not introduce
+a durable standalone recovery journal.
+
+This boundary covers guarded recovery from returned errors during managed
+installation and stale cleanup, not crash/power-loss recovery, race-proof path
+confinement or rollback of personal vault scaffolding and repository clones.
+Those personal/unmanaged resources remain outside managed ownership.
+
 ## Share preflight and failure-return recovery
 
 Before creating the share branch, apply captures original rewrite bytes, real-file

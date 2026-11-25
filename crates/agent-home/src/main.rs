@@ -696,6 +696,7 @@ fn validate_manifest_scope(
 /// Remove symlinks recorded by an earlier install that this install no longer plans (for example
 /// `~/Team` after switching to `--vault`). A link is removed only if it still points exactly where
 /// Vesica put it; a link the user changed is left in place and released from the manifest.
+#[cfg(test)]
 fn prune_stale_impl<F>(
     cfg: &Path,
     plan: &ah_core::Plan,
@@ -707,9 +708,51 @@ fn prune_stale_impl<F>(
 where
     F: FnMut(usize, &Path) -> Result<()>,
 {
+    assert_eq!(plan.dry_run, dry);
     let manifest_path = cfg.join("manifest.json");
     let mut manifest = ah_core::Manifest::load(&manifest_path)?;
-    validate_manifest_scope(&manifest, machine_root, cfg)?;
+    let mut removed = Vec::new();
+    let result = (|| -> Result<()> {
+        if prune_stale_manifest(
+            &mut manifest,
+            cfg,
+            plan,
+            machine_root,
+            journal.as_deref_mut(),
+            &mut removed,
+            &mut before_remove,
+        )? {
+            manifest.save_atomic(&manifest_path)?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let errors = restore_pruned_nodes(&removed);
+        if !errors.is_empty() {
+            anyhow::bail!(
+                "{error:#}; stale-prune rollback incomplete: {}",
+                errors.join("; ")
+            );
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn prune_stale_manifest<F>(
+    manifest: &mut ah_core::Manifest,
+    cfg: &Path,
+    plan: &ah_core::Plan,
+    machine_root: &Path,
+    mut journal: Option<&mut recovery::Journal>,
+    removed: &mut Vec<(PathBuf, recovery::Node)>,
+    mut before_remove: F,
+) -> Result<bool>
+where
+    F: FnMut(usize, &Path) -> Result<()>,
+{
+    validate_manifest_scope(manifest, machine_root, cfg)?;
+    let dry = plan.dry_run;
     let mut removal_count = 0;
     let planned: std::collections::BTreeSet<&str> =
         plan.actions.iter().map(ah_core::Action::key).collect();
@@ -751,9 +794,10 @@ where
                         println!("Would remove stale generated file: {key}");
                         continue;
                     }
+                    let before = recovery::Node::read(target)?;
                     removal_count += 1;
                     before_remove(removal_count, target)?;
-                    remove_pruned_node(target, journal.as_deref_mut())?;
+                    remove_pruned_node(target, &before, removed, journal.as_deref_mut())?;
                     println!("Removed stale generated file: {key}");
                 }
             }
@@ -771,9 +815,10 @@ where
                     println!("Would remove stale link: {key}");
                     continue;
                 }
+                let before = recovery::Node::read(target)?;
                 removal_count += 1;
                 before_remove(removal_count, target)?;
-                remove_pruned_node(target, journal.as_deref_mut())?;
+                remove_pruned_node(target, &before, removed, journal.as_deref_mut())?;
                 println!("Removed stale link: {key}");
             } else if std::fs::symlink_metadata(target).is_err() {
                 println!("Forgot missing stale link: {key}");
@@ -786,15 +831,33 @@ where
             changed = true;
         }
     }
-    if changed {
-        manifest.save_atomic(&manifest_path)?;
-    }
-    Ok(())
+    Ok(changed)
 }
 
-fn remove_pruned_node(target: &Path, journal: Option<&mut recovery::Journal>) -> Result<()> {
-    let before = recovery::Node::read(target)?;
+fn restore_pruned_nodes(removed: &[(PathBuf, recovery::Node)]) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (path, before) in removed.iter().rev() {
+        if let Err(error) = before.restore(path, &recovery::Node::Absent) {
+            errors.push(format!("{}: {error:#}", path.display()));
+        }
+    }
+    errors
+}
+
+fn remove_pruned_node(
+    target: &Path,
+    before: &recovery::Node,
+    removed: &mut Vec<(PathBuf, recovery::Node)>,
+    journal: Option<&mut recovery::Journal>,
+) -> Result<()> {
+    if !before.matches(target)? {
+        anyhow::bail!(
+            "stale target changed before removal; preserving user changes: {}",
+            target.display()
+        );
+    }
     std::fs::remove_file(target)?;
+    removed.push((target.to_path_buf(), before.clone()));
     if let Some(journal) = journal {
         if let Err(error) = journal.record_postimage(target, recovery::Node::Absent) {
             // The deletion is ours even when saving its checkpoint fails. Undo it
@@ -803,6 +866,7 @@ fn remove_pruned_node(target: &Path, journal: Option<&mut recovery::Journal>) ->
                 let saved = journal.save().err();
                 anyhow::bail!("prune checkpoint failed: {error:#}; prune rollback failed: {rollback:#}; recovery checkpoint retry: {saved:?}");
             }
+            removed.pop();
             anyhow::bail!("prune checkpoint failed: {error:#}; pruned node restored");
         }
     }
@@ -2060,6 +2124,61 @@ fn install_impl<F>(o: InstallOptions, recovery_path: Option<&Path>, before_seal:
 where
     F: FnOnce() -> Result<()>,
 {
+    install_impl_with_snapshot(o, recovery_path, before_seal, recovery::Node::read)
+}
+
+fn install_impl_with_snapshot<F, S>(
+    o: InstallOptions,
+    recovery_path: Option<&Path>,
+    before_seal: F,
+    snapshot_manifest: S,
+) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+    S: FnOnce(&Path) -> Result<recovery::Node>,
+{
+    install_impl_with_entry_read(o, recovery_path, before_seal, snapshot_manifest, |path| {
+        std::fs::read(path)
+    })
+}
+
+fn install_impl_with_entry_read<F, S, R>(
+    o: InstallOptions,
+    recovery_path: Option<&Path>,
+    before_seal: F,
+    snapshot_manifest: S,
+    read_entry: R,
+) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+    S: FnOnce(&Path) -> Result<recovery::Node>,
+    R: FnMut(&Path) -> std::io::Result<Vec<u8>>,
+{
+    use std::io::Write;
+    install_impl_with_backup_write(
+        o,
+        recovery_path,
+        before_seal,
+        snapshot_manifest,
+        read_entry,
+        |_, file, bytes| file.write_all(bytes),
+    )
+}
+
+fn install_impl_with_backup_write<F, S, R, W>(
+    o: InstallOptions,
+    recovery_path: Option<&Path>,
+    before_seal: F,
+    snapshot_manifest: S,
+    mut read_entry: R,
+    write_backup: W,
+) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+    S: FnOnce(&Path) -> Result<recovery::Node>,
+    R: FnMut(&Path) -> std::io::Result<Vec<u8>>,
+    W: FnMut(&Path, &mut std::fs::File, &[u8]) -> std::io::Result<()>,
+{
     let InstallOptions {
         home_repo,
         root,
@@ -2646,19 +2765,30 @@ where
         }
         _ => None,
     };
-    let outcomes = ah_core::action::Executor.execute_with_commit(&plan, |outcomes| {
+    let created_backups = std::cell::RefCell::new(Vec::new());
+    let acceptance_failed = std::cell::Cell::new(false);
+    let acceptance_restored = std::cell::Cell::new(true);
+    let outcomes = ah_core::action::Executor.execute_with_commit_and_rollback(&plan, |outcomes| {
         if plan.dry_run {
+            let mut manifest = ah_core::Manifest::load(&cfg.join("manifest.json"))?;
+            prune_stale_manifest(&mut manifest, &cfg, &plan, &home, None, &mut Vec::new(), |_, _| Ok(()))?;
             return Ok(());
         }
         if outcomes.contains(&ah_core::ActionOutcome::Collision) {
             anyhow::bail!("install stopped on an existing destination; no changes should be treated as fully applied");
         }
         let local_preimage = local_preimage.as_ref();
-        let created_backups = create_install_backups(&pending_backups)?;
+        // This lifetime owns commit-created backups across every later fallible
+        // step, including preimage acquisition before the persistence closure.
+        let acceptance = (|| -> Result<()> {
+        // Registration survives Err: completed originals belong to this outer
+        // owner until executor restoration is known, including creator errors.
+        create_install_backups_with_write(&pending_backups, &mut created_backups.borrow_mut(), write_backup)?;
         let mut local_postimage = None;
         let manifest_path = cfg.join("manifest.json");
-        let manifest_preimage = recovery::Node::read(&manifest_path)?;
+        let manifest_preimage = snapshot_manifest(&manifest_path)?;
         let mut manifest_postimage = None;
+        let mut pruned_nodes = Vec::new();
         let persist_result = (|| -> Result<()> {
             let mut m = ah_core::Manifest::load(&cfg.join("manifest.json"))?;
             let previous = m.clone();
@@ -2679,7 +2809,7 @@ where
                         | ah_core::ActionOutcome::Updated
                         | ah_core::ActionOutcome::AlreadyCorrect
                 ) {
-                    let mut item = entry(a, backups.get(a.key()))?;
+                    let mut item = entry_with_read(a, backups.get(a.key()), &mut read_entry)?;
                     if let Some(old) = previous.entries.get(a.key()) {
                         item.backup = old.backup.clone();
                         item.original_sha256 = old.original_sha256.clone();
@@ -2687,6 +2817,9 @@ where
                     m.record(a, item);
                 }
             }
+            // Stale removals belong to the same acceptance boundary as actions,
+            // machine facts and manifest persistence, even without an updater journal.
+            prune_stale_manifest(&mut m, &cfg, &plan, &home, recovery_journal.as_mut(), &mut pruned_nodes, |_, _| Ok(()))?;
             let expected_manifest = recovery::Node::File {
                 bytes: serde_json::to_vec_pretty(&m)?,
                 permissions: {
@@ -2703,7 +2836,7 @@ where
             Ok(())
         })();
         let cleanup_errors = if persist_result.is_err() {
-            let mut errors = remove_install_backups(&created_backups, &pending_backups);
+            let mut errors = restore_pruned_nodes(&pruned_nodes);
             if let Some(postimage) = &manifest_postimage {
                 if let Err(error) = manifest_preimage.restore(&manifest_path, postimage) {
                     errors.push(format!("manifest rollback failed: {error:#}"));
@@ -2717,28 +2850,24 @@ where
         } else {
             Vec::new()
         };
+        acceptance_restored.set(cleanup_errors.is_empty());
         match (persist_result, cleanup_errors.is_empty()) {
             (Err(error), true) => Err(error),
             (Err(error), false) => anyhow::bail!(
-                "manifest commit failed: {error:#}; backup cleanup also failed: {}",
+                "install commit failed: {error:#}; rollback/cleanup also failed: {}",
                 cleanup_errors.join("; ")
             ),
             (Ok(()), _) => Ok(()),
         }
+        })();
+        acceptance_failed.set(acceptance.is_err());
+        acceptance
+    }, |restored| {
+        if !acceptance_failed.get() { return Ok(()); }
+        finalize_install_backups(&created_backups.borrow(), restored && acceptance_restored.get())
     })?;
     for (a, r) in plan.actions.iter().zip(&outcomes) {
         println!("{r:?}: {}", a.key())
-    }
-    prune_stale_impl(
-        &cfg,
-        &plan,
-        &home,
-        dry_run,
-        recovery_journal.as_mut(),
-        |_, _| Ok(()),
-    )?;
-    if let Some(journal) = recovery_journal.as_mut() {
-        journal.seal()?;
     }
     if dry_run {
         match &repo_plan {
@@ -2922,11 +3051,65 @@ fn restore_local_config(
     }
 }
 
-fn create_install_backups(pending: &[(PathBuf, Vec<u8>)]) -> Result<Vec<PathBuf>> {
-    use std::io::Write;
+#[derive(Debug)]
+struct InstallBackup {
+    path: PathBuf,
+    identity: Option<std::fs::Metadata>,
+    expected: Vec<u8>,
+    complete: bool,
+}
 
+/// Called after executor undo, never before its restoration result is known.
+fn finalize_install_backups(created: &[InstallBackup], restored: bool) -> Result<()> {
+    if !restored && !created.is_empty() {
+        anyhow::bail!(
+            "managed rollback incomplete; original backups retained for owner inspection: {}",
+            created
+                .iter()
+                .map(|b| b.path.display().to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
+    // An incomplete artifact in the returned inventory already failed its
+    // creator cleanup. Do not repeat destructive cleanup in the outer owner.
+    let mut cleanup = Vec::new();
+    for backup in created {
+        if backup.complete {
+            cleanup.extend(remove_install_backups(std::slice::from_ref(backup)));
+        } else {
+            cleanup.push(format!(
+                "{}: partial backup creator cleanup failed; preserved",
+                backup.path.display()
+            ));
+        }
+    }
+    if !cleanup.is_empty() {
+        anyhow::bail!("backup cleanup incomplete: {}", cleanup.join("; "));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn create_install_backups(pending: &[(PathBuf, Vec<u8>)]) -> Result<Vec<InstallBackup>> {
+    use std::io::Write;
     let mut created = Vec::new();
+    create_install_backups_with_write(pending, &mut created, |_, file, contents| {
+        file.write_all(contents)
+    })?;
+    Ok(created)
+}
+
+fn create_install_backups_with_write<F>(
+    pending: &[(PathBuf, Vec<u8>)],
+    created: &mut Vec<InstallBackup>,
+    mut write: F,
+) -> Result<()>
+where
+    F: FnMut(&Path, &mut std::fs::File, &[u8]) -> std::io::Result<()>,
+{
     for (path, contents) in pending {
+        let registered_before = created.len();
         let write_result = (|| -> std::io::Result<()> {
             let mut options = std::fs::OpenOptions::new();
             options.write(true).create_new(true);
@@ -2936,62 +3119,115 @@ fn create_install_backups(pending: &[(PathBuf, Vec<u8>)]) -> Result<Vec<PathBuf>
                 options.mode(0o600);
             }
             let mut file = options.open(path)?;
-            created.push(path.clone());
-            file.write_all(contents)
+            // Record creation before any fallible capture/write; unknown ownership
+            // fails closed and is retained with diagnostics, never silently dropped.
+            created.push(InstallBackup {
+                path: path.clone(),
+                identity: None,
+                expected: contents.clone(),
+                complete: false,
+            });
+            let backup = created.last_mut().unwrap();
+            backup.identity = Some(file.metadata()?);
+            write(path, &mut file, contents)?;
+            // Full original bytes are recovery evidence even if later sync fails.
+            backup.complete = true;
+            file.sync_all()?;
+            Ok(())
         })();
         if let Err(error) = write_result {
-            remove_install_backups(&created, pending);
+            // Only the current incomplete output is creator-cleaned. Earlier
+            // completed originals (and a fully written sync-failed original)
+            // stay in the caller's inventory until action restoration finishes.
+            let cleanup = if created.last().is_some_and(|b| !b.complete)
+                && created.len() > registered_before
+            {
+                let errors = remove_install_backups(&created[registered_before..]);
+                if errors.is_empty() {
+                    created.truncate(registered_before);
+                }
+                errors
+            } else {
+                Vec::new()
+            };
+            if !cleanup.is_empty() {
+                anyhow::bail!(
+                    "writing backup {}: {error}; backup cleanup incomplete: {}",
+                    path.display(),
+                    cleanup.join("; ")
+                );
+            }
             return Err(error).with_context(|| format!("writing backup {}", path.display()));
         }
     }
-    Ok(created)
+    Ok(())
 }
 
-fn remove_install_backups(created: &[PathBuf], pending: &[(PathBuf, Vec<u8>)]) -> Vec<String> {
+fn remove_install_backups(created: &[InstallBackup]) -> Vec<String> {
     let mut errors = Vec::new();
-    for path in created.iter().rev() {
-        let Some((_, expected)) = pending.iter().find(|(candidate, _)| candidate == path) else {
-            continue;
-        };
-        let metadata = match std::fs::symlink_metadata(path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                errors.push(format!(
-                    "{}: cannot inspect backup: {error}",
-                    path.display()
-                ));
-                continue;
+    for backup in created.iter().rev() {
+        let path = &backup.path;
+        let cleanup = (|| -> Result<()> {
+            let current = match std::fs::symlink_metadata(path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(error).context("cannot inspect backup"),
+            };
+            let identity = backup
+                .identity
+                .as_ref()
+                .context("cannot verify created backup ownership; preserved")?;
+            #[cfg(unix)]
+            let same_node = {
+                use std::os::unix::fs::MetadataExt;
+                current.dev() == identity.dev() && current.ino() == identity.ino()
+            };
+            #[cfg(not(unix))]
+            let same_node = false; // Native file-ID support needs its own implementation/evidence.
+            if !current.is_file()
+                || current.file_type().is_symlink()
+                || !same_node
+                || current.permissions() != identity.permissions()
+            {
+                anyhow::bail!("backup was replaced or permissions changed; preserved");
             }
-        };
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            errors.push(format!(
-                "{}: backup was replaced; preserved",
-                path.display()
-            ));
-            continue;
-        }
-        match std::fs::read(path) {
-            Ok(actual) if actual == *expected => {
-                if let Err(error) = std::fs::remove_file(path) {
-                    errors.push(format!("{}: cannot remove backup: {error}", path.display()));
-                }
+            let actual = std::fs::read(path).context("cannot verify backup")?;
+            if (backup.complete && actual != backup.expected)
+                || !backup.expected.starts_with(&actual)
+            {
+                anyhow::bail!("backup changed; preserved");
             }
-            Ok(_) => errors.push(format!("{}: backup changed; preserved", path.display())),
-            Err(error) => errors.push(format!("{}: cannot verify backup: {error}", path.display())),
+            std::fs::remove_file(path).context("cannot remove backup")?;
+            Ok(())
+        })();
+        if let Err(error) = cleanup {
+            errors.push(format!("{}: {error:#}", path.display()));
         }
     }
     errors
 }
 
-fn entry(a: &ah_core::Action, backup_path: Option<&PathBuf>) -> Result<ah_core::ManifestEntry> {
+fn entry_with_read<R>(
+    a: &ah_core::Action,
+    backup_path: Option<&PathBuf>,
+    mut read: R,
+) -> Result<ah_core::ManifestEntry>
+where
+    R: FnMut(&Path) -> std::io::Result<Vec<u8>>,
+{
     use sha2::{Digest, Sha256};
     let p = Path::new(a.key());
-    let original = if backup_path.is_some() {
-        backup_path.and_then(|b| std::fs::read(b).ok())
-    } else {
-        None
-    };
+    // Backup bytes are required recovery evidence, not an optional diagnostic.
+    let original = backup_path
+        .map(|path| {
+            read(path).with_context(|| {
+                format!(
+                    "cannot read install backup for manifest entry: {}",
+                    path.display()
+                )
+            })
+        })
+        .transpose()?;
     let (kind, source) = match a {
         ah_core::Action::Symlink { source, .. } => ("symlink", Some(source.clone())),
         ah_core::Action::UpsertBlock { .. } => ("managed-block", None),
@@ -3003,11 +3239,37 @@ fn entry(a: &ah_core::Action, backup_path: Option<&PathBuf>) -> Result<ah_core::
         ah_core::Action::WriteFile { .. } => ("generated-file", None),
         _ => ("file", None),
     };
-    let bytes = std::fs::read(p).unwrap_or_default();
-    let installed_sha256 = if bytes.is_empty() {
-        None
-    } else {
-        Some(hex::encode(Sha256::digest(bytes)))
+    // Non-file actions deliberately have no byte hash. Never follow a symlink
+    // merely to hash its referent or convert a required regular-file read error
+    // (including an empty file's valid hash) into accepted, hashless state.
+    let installed_sha256 = match a {
+        ah_core::Action::WriteFile { .. }
+        | ah_core::Action::UpsertBlock { .. }
+        | ah_core::Action::MergeJsonc { .. }
+        | ah_core::Action::MergeToml { .. } => {
+            let metadata = std::fs::symlink_metadata(p).with_context(|| {
+                format!(
+                    "cannot inspect installed file for manifest entry: {}",
+                    p.display()
+                )
+            })?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                anyhow::bail!(
+                    "installed manifest target is not a regular file: {}",
+                    p.display()
+                );
+            }
+            let bytes = read(p).with_context(|| {
+                format!(
+                    "cannot read installed file for manifest entry: {}",
+                    p.display()
+                )
+            })?;
+            Some(hex::encode(Sha256::digest(bytes)))
+        }
+        ah_core::Action::Symlink { .. }
+        | ah_core::Action::CreateDir { .. }
+        | ah_core::Action::RemovePath { .. } => None,
     };
     let backup = backup_path.map(|path| path.to_string_lossy().into_owned());
     let original_sha256 = original.map(|bytes| hex::encode(Sha256::digest(bytes)));
@@ -3769,6 +4031,821 @@ mod tests {
             assert_eq!(std::fs::read_link(root.join(name)).unwrap(), temp.path());
         }
         assert_eq!(std::fs::read(&mp).unwrap(), before);
+    }
+
+    #[test]
+    fn install_post_backup_snapshot_error_cleans_artifacts_and_roundtrips_local_state() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        let shared = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/shared-home");
+        let mut failures = Vec::new();
+        for present in [false, true] {
+            for updater in [false, true] {
+                for conflict in [false, true] {
+                    let temp = tempfile::tempdir().unwrap();
+                    let home = temp.path().join("home");
+                    let cfg = home.join(".config/agent-home");
+                    std::fs::create_dir_all(&cfg).unwrap();
+                    let bash = home.join(".bashrc");
+                    std::fs::write(&bash, b"# owner original shell config\n").unwrap();
+                    std::fs::set_permissions(&bash, std::fs::Permissions::from_mode(0o640))
+                        .unwrap();
+                    let local = cfg.join("config.toml");
+                    if present {
+                        std::fs::write(&local, b"schema = 1\nprofile = \"core\"\n# owner config\n")
+                            .unwrap();
+                        std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o640))
+                            .unwrap();
+                    }
+                    let before_bash = recovery::Node::read(&bash).unwrap();
+                    let before_local = recovery::Node::read(&local).unwrap();
+                    let options = || InstallOptions {
+                        home_repo: Some(shared.clone()),
+                        root: Some(home.clone()),
+                        profile: Some(ProfileArg::Core),
+                        dry_run: false,
+                        repos_dir: None,
+                        vault: None,
+                    };
+                    let recovery_path = temp.path().join("transaction.json");
+                    let mut backup_path = None;
+                    let error = install_impl_with_snapshot(
+                        options(),
+                        updater.then_some(recovery_path.as_path()),
+                        || Ok(()),
+                        |_| {
+                            let backups = std::fs::read_dir(&home)?
+                                .filter_map(|e| {
+                                    let p = e.ok()?.path();
+                                    p.file_name()?
+                                        .to_str()?
+                                        .starts_with(".bashrc.vesica-backup-")
+                                        .then_some(p)
+                                })
+                                .collect::<Vec<_>>();
+                            assert_eq!(backups.len(), 1, "fault must follow backup creation");
+                            assert_eq!(
+                                std::fs::read(&backups[0])?,
+                                b"# owner original shell config\n"
+                            );
+                            if conflict {
+                                std::fs::set_permissions(
+                                    &backups[0],
+                                    std::fs::Permissions::from_mode(0o640),
+                                )?;
+                            }
+                            backup_path = Some(backups[0].clone());
+                            Err(std::io::Error::from_raw_os_error(5).into())
+                        },
+                    )
+                    .unwrap_err();
+                    let text = format!("{error:#}");
+                    assert!(text.contains("Input/output error"));
+                    assert!(before_bash.matches(&bash).unwrap());
+                    assert!(before_local.matches(&local).unwrap());
+                    assert!(!cfg.join("manifest.json").exists());
+                    let backup = backup_path.unwrap();
+                    if conflict {
+                        assert_eq!(
+                            std::fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
+                            0o640
+                        );
+                        if !text.contains("backup cleanup incomplete")
+                            || !text.contains(backup.to_str().unwrap())
+                        {
+                            failures.push(format!("present={present} updater={updater}: silent retained backup conflict"));
+                        }
+                        std::fs::remove_file(&backup).unwrap(); // Only the synthetic obstruction.
+                    } else if backup.exists() {
+                        failures.push(format!("present={present} updater={updater}: unmanifested backup retained after snapshot error"));
+                        std::fs::remove_file(&backup).unwrap();
+                    }
+                    // Ignore only fresh precreated empty directories and the updater's
+                    // explicit retained recovery record; no managed output survives.
+                    assert!(!home.join(".claude/CLAUDE.md").exists());
+                    install(options()).unwrap();
+                    assert!(cfg.join("manifest.json").is_file());
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn install_entry_read_errors_restore_local_and_managed_state_and_allow_retry() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        let shared = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/shared-home");
+        for present in [false, true] {
+            for updater in [false, true] {
+                for fault in ["backup", "installed"] {
+                    let temp = tempfile::tempdir().unwrap();
+                    let home = temp.path().join("home");
+                    let cfg = home.join(".config/agent-home");
+                    std::fs::create_dir_all(&cfg).unwrap();
+                    let bash = home.join(".bashrc");
+                    std::fs::write(&bash, b"# owner original shell config\n").unwrap();
+                    std::fs::set_permissions(&bash, std::fs::Permissions::from_mode(0o640))
+                        .unwrap();
+                    let local = cfg.join("config.toml");
+                    if present {
+                        std::fs::write(&local, b"schema = 1\nprofile = \"core\"\n# owner config\n")
+                            .unwrap();
+                        std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o640))
+                            .unwrap();
+                    }
+                    let before_bash = recovery::Node::read(&bash).unwrap();
+                    let before_local = recovery::Node::read(&local).unwrap();
+                    let options = || InstallOptions {
+                        home_repo: Some(shared.clone()),
+                        root: Some(home.clone()),
+                        profile: Some(ProfileArg::Core),
+                        dry_run: false,
+                        repos_dir: None,
+                        vault: None,
+                    };
+                    let journal = temp.path().join("transaction.json");
+                    let mut fired = false;
+                    let result = install_impl_with_entry_read(
+                        options(),
+                        updater.then_some(journal.as_path()),
+                        || Ok(()),
+                        recovery::Node::read,
+                        |path| {
+                            let selected = if fault == "backup" {
+                                path.file_name()
+                                    .unwrap()
+                                    .to_string_lossy()
+                                    .starts_with(".bashrc.vesica-backup-")
+                            } else {
+                                path == bash
+                            };
+                            if selected && !fired {
+                                fired = true;
+                                assert!(
+                                    local.is_file(),
+                                    "entry error must follow local persistence"
+                                );
+                                assert_ne!(
+                                    std::fs::read(&bash).unwrap(),
+                                    b"# owner original shell config\n"
+                                );
+                                return Err(std::io::Error::from_raw_os_error(5));
+                            }
+                            std::fs::read(path)
+                        },
+                    );
+                    assert!(fired, "entry fault was not reached");
+                    let error = result.expect_err(&format!(
+                        "install accepted {fault} read EIO: present={present} updater={updater}"
+                    ));
+                    assert!(format!("{error:#}").contains("Input/output error"));
+                    assert!(before_bash.matches(&bash).unwrap());
+                    assert!(before_local.matches(&local).unwrap());
+                    assert!(!cfg.join("manifest.json").exists());
+                    assert!(!home.join(".claude/CLAUDE.md").exists());
+                    assert!(!std::fs::read_dir(&home).unwrap().any(|e| e
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .contains("vesica-backup")));
+                    install(options()).unwrap();
+                    install(options()).unwrap();
+                    uninstall(Some(&home), false).unwrap();
+                    assert!(before_bash.matches(&bash).unwrap());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn install_creator_error_handoff_retains_completed_original_until_undo_is_known() {
+        use super::*;
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let shared = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/shared-home");
+        for updater in [false, true] {
+            for conflict in [true, false] {
+                for prefix in [0, 5] {
+                    let temp = tempfile::tempdir().unwrap();
+                    let home = temp.path().join("home");
+                    let bash = home.join(".bashrc");
+                    let claude = home.join(".claude/CLAUDE.md");
+                    std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+                    let original = b"# original shell\r\nno final newline";
+                    let other = b"# original Claude\r\nno final newline";
+                    for (path, bytes) in [(&bash, original.as_slice()), (&claude, other.as_slice())]
+                    {
+                        std::fs::write(path, bytes).unwrap();
+                        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640))
+                            .unwrap();
+                    }
+                    let options = || InstallOptions {
+                        home_repo: Some(shared.clone()),
+                        root: Some(home.clone()),
+                        profile: Some(ProfileArg::Core),
+                        dry_run: false,
+                        repos_dir: None,
+                        vault: None,
+                    };
+                    let journal = temp.path().join("transaction.json");
+                    let mut first_backup = None;
+                    let mut partial_backup = None;
+                    let error = install_impl_with_backup_write(
+                        options(),
+                        updater.then_some(journal.as_path()),
+                        || Ok(()),
+                        recovery::Node::read,
+                        |p| std::fs::read(p),
+                        |p, file, bytes| {
+                            if first_backup.is_none() {
+                                assert!(p
+                                    .file_name()
+                                    .unwrap()
+                                    .to_string_lossy()
+                                    .starts_with(".bashrc.vesica-backup-"));
+                                assert_eq!(bytes, original);
+                                first_backup = Some(p.to_path_buf());
+                                return file.write_all(bytes);
+                            }
+                            assert!(p
+                                .file_name()
+                                .unwrap()
+                                .to_string_lossy()
+                                .starts_with("CLAUDE.md.vesica-backup-"));
+                            partial_backup = Some(p.to_path_buf());
+                            file.write_all(&bytes[..prefix])?;
+                            if conflict {
+                                std::fs::write(&bash, b"# intervening owner edit")?;
+                            }
+                            Err(std::io::Error::from_raw_os_error(5))
+                        },
+                    )
+                    .unwrap_err();
+                    let first = first_backup.unwrap();
+                    let partial = partial_backup.unwrap();
+                    let text = format!("{error:#}");
+                    assert!(text.contains("Input/output error"));
+                    if conflict {
+                        assert!(
+                            first.is_file(),
+                            "creator error deleted completed original before guarded undo: {text}"
+                        );
+                        assert_eq!(std::fs::read(&first).unwrap(), original);
+                        assert_eq!(std::fs::read(&bash).unwrap(), b"# intervening owner edit");
+                        assert!(
+                            text.contains("rollback also failed")
+                                && text.contains("original backups retained")
+                                && text.contains(first.to_str().unwrap()),
+                            "{text}"
+                        );
+                    } else {
+                        assert!(!first.exists());
+                        assert_eq!(std::fs::read(&bash).unwrap(), original);
+                        install(options()).unwrap();
+                        uninstall(Some(&home), false).unwrap();
+                        assert_eq!(std::fs::read(&bash).unwrap(), original);
+                        assert_eq!(std::fs::read(&claude).unwrap(), other);
+                    }
+                    assert!(
+                        !partial.exists(),
+                        "owned partial backup was not cleaned: {text}"
+                    );
+                    assert_eq!(std::fs::read(&claude).unwrap(), other);
+                    assert_eq!(
+                        std::fs::metadata(&bash).unwrap().permissions().mode() & 0o777,
+                        0o640
+                    );
+                    assert!(!home.join(".config/agent-home/manifest.json").exists());
+                    if conflict {
+                        assert!(!home.join(".config/agent-home/config.toml").exists());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn install_rollback_conflict_retains_original_backup_with_diagnostics() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        let shared = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/shared-home");
+        for updater in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let home = temp.path().join("home");
+            std::fs::create_dir(&home).unwrap();
+            let bash = home.join(".bashrc");
+            std::fs::write(&bash, b"# original owner bytes\n").unwrap();
+            std::fs::set_permissions(&bash, std::fs::Permissions::from_mode(0o640)).unwrap();
+            let journal = temp.path().join("journal.json");
+            let mut retained = None;
+            let options = InstallOptions {
+                home_repo: Some(shared.clone()),
+                root: Some(home.clone()),
+                profile: Some(ProfileArg::Core),
+                dry_run: false,
+                repos_dir: None,
+                vault: None,
+            };
+            let error = install_impl_with_entry_read(
+                options,
+                updater.then_some(journal.as_path()),
+                || Ok(()),
+                recovery::Node::read,
+                |path| {
+                    if path
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(".bashrc.vesica-backup-")
+                    {
+                        retained = Some(path.to_path_buf());
+                        std::fs::write(&bash, b"# intervening owner edit\n")?;
+                        return Err(std::io::Error::from_raw_os_error(5));
+                    }
+                    std::fs::read(path)
+                },
+            )
+            .unwrap_err();
+            let backup = retained.unwrap();
+            assert!(
+                backup.is_file(),
+                "rollback conflict deleted original backup: {error:#}"
+            );
+            assert_eq!(std::fs::read(&backup).unwrap(), b"# original owner bytes\n");
+            assert_eq!(std::fs::read(&bash).unwrap(), b"# intervening owner edit\n");
+            let text = format!("{error:#}");
+            assert!(
+                text.contains("Input/output error")
+                    && text.contains("rollback also failed")
+                    && text.contains(backup.to_str().unwrap())
+            );
+            assert!(!home.join(".config/agent-home/config.toml").exists());
+            assert!(!home.join(".config/agent-home/manifest.json").exists());
+        }
+    }
+
+    #[test]
+    fn manifest_entry_hashes_empty_regular_files_and_does_not_read_nonfile_actions() {
+        use super::*;
+        use sha2::Digest;
+        let temp = tempfile::tempdir().unwrap();
+        let p = temp.path().join("empty");
+        std::fs::write(&p, []).unwrap();
+        let path = p.to_string_lossy().into_owned();
+        let actions = [
+            ah_core::Action::WriteFile {
+                path: path.clone(),
+                content: String::new(),
+            },
+            ah_core::Action::UpsertBlock {
+                path: path.clone(),
+                style: "sh".into(),
+                name: "test".into(),
+                body: String::new(),
+            },
+            ah_core::Action::MergeJsonc {
+                path: path.clone(),
+                patch: serde_json::json!({}),
+            },
+            ah_core::Action::MergeToml {
+                path: path.clone(),
+                patch: serde_json::json!({}),
+            },
+        ];
+        let expected = hex::encode(sha2::Sha256::digest([]));
+        for action in actions {
+            let item = entry_with_read(&action, Some(&p), |p| std::fs::read(p)).unwrap();
+            assert_eq!(item.original_sha256.as_deref(), Some(expected.as_str()));
+            assert_eq!(item.installed_sha256.as_deref(), Some(expected.as_str()));
+            let error =
+                entry_with_read(&action, None, |_| Err(std::io::Error::from_raw_os_error(5)))
+                    .unwrap_err();
+            assert!(format!("{error:#}").contains("cannot read installed file"));
+        }
+        let absent = temp.path().join("absent").to_string_lossy().into_owned();
+        for action in [
+            ah_core::Action::Symlink {
+                source: path,
+                destination: absent.clone(),
+            },
+            ah_core::Action::CreateDir {
+                path: absent.clone(),
+            },
+            ah_core::Action::RemovePath { path: absent },
+        ] {
+            let item = entry_with_read(&action, None, |_| {
+                panic!("non-file action must not read a referent")
+            })
+            .unwrap();
+            assert!(item.installed_sha256.is_none());
+        }
+    }
+
+    #[test]
+    fn manifest_entry_regular_targets_refuse_symlinks_directories_and_missing_nodes() {
+        use super::*;
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::write(&outside, b"owner bytes").unwrap();
+        for kind in ["link", "directory", "absent"] {
+            let p = temp.path().join(kind);
+            match kind {
+                "link" => symlink(&outside, &p).unwrap(),
+                "directory" => std::fs::create_dir(&p).unwrap(),
+                _ => {}
+            }
+            let action = ah_core::Action::WriteFile {
+                path: p.to_string_lossy().into_owned(),
+                content: "owner bytes".into(),
+            };
+            let error = entry_with_read(&action, None, |_| {
+                panic!("unexpected target type must refuse before read")
+            })
+            .unwrap_err();
+            assert!(format!("{error:#}").contains(if kind == "absent" {
+                "cannot inspect installed file"
+            } else {
+                "not a regular file"
+            }));
+            assert_eq!(std::fs::read(&outside).unwrap(), b"owner bytes");
+        }
+    }
+
+    #[test]
+    fn backup_creation_collision_preserves_completed_inventory_and_foreign_node() {
+        use super::*;
+        use std::io::Write;
+        use std::os::unix::fs::symlink;
+        for shape in ["file", "link", "directory"] {
+            for restored in [false, true] {
+                let temp = tempfile::tempdir().unwrap();
+                let first = temp.path().join("first");
+                let second = temp.path().join("second");
+                let sentinel = temp.path().join("sentinel");
+                std::fs::write(&sentinel, b"owner sentinel").unwrap();
+                match shape {
+                    "file" => std::fs::write(&second, b"foreign backup").unwrap(),
+                    "link" => symlink(&sentinel, &second).unwrap(),
+                    "directory" => std::fs::create_dir(&second).unwrap(),
+                    _ => unreachable!(),
+                }
+                let original_node = recovery::Node::read(&second).unwrap();
+                let mut owned = Vec::new();
+                let error = create_install_backups_with_write(
+                    &[
+                        (first.clone(), b"complete original".to_vec()),
+                        (second.clone(), b"other original".to_vec()),
+                    ],
+                    &mut owned,
+                    |_, f, bytes| f.write_all(bytes),
+                )
+                .unwrap_err();
+                assert!(format!("{error:#}").contains("writing backup"));
+                assert_eq!(owned.len(), 1);
+                assert!(owned[0].complete);
+                assert_eq!(std::fs::read(&first).unwrap(), b"complete original");
+                let finalized = finalize_install_backups(&owned, restored);
+                if restored {
+                    finalized.unwrap();
+                    assert!(!first.exists());
+                } else {
+                    assert!(
+                        format!("{:#}", finalized.unwrap_err()).contains(first.to_str().unwrap())
+                    );
+                    assert_eq!(std::fs::read(&first).unwrap(), b"complete original");
+                }
+                assert!(original_node.matches(&second).unwrap());
+                assert_eq!(std::fs::read(&sentinel).unwrap(), b"owner sentinel");
+            }
+        }
+    }
+
+    #[test]
+    fn backup_write_failures_remove_owned_short_writes_and_allow_retry() {
+        use super::*;
+        use std::io::Write;
+        for position in [0, 1, 2] {
+            for prefix in [0, 5] {
+                let temp = tempfile::tempdir().unwrap();
+                let pending = (0..3)
+                    .map(|i| {
+                        (
+                            temp.path().join(format!("backup-{i}")),
+                            b"original user bytes\n".to_vec(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let mut i = 0;
+                let mut owned = Vec::new();
+                let error =
+                    create_install_backups_with_write(&pending, &mut owned, |_, file, contents| {
+                        let current = i;
+                        i += 1;
+                        if current == position {
+                            file.write_all(&contents[..prefix])?;
+                            return Err(std::io::Error::from_raw_os_error(5));
+                        }
+                        file.write_all(contents)
+                    })
+                    .unwrap_err();
+                assert!(format!("{error:#}").contains("Input/output error"));
+                assert_eq!(owned.len(), position);
+                for artifact in &owned {
+                    assert!(artifact.complete && artifact.path.is_file());
+                }
+                finalize_install_backups(&owned, true).unwrap();
+                assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0,
+                    "failed backup write retained owned partial file: position={position} prefix={prefix}");
+                let created = create_install_backups(&pending).unwrap();
+                assert_eq!(created.len(), 3);
+                assert!(remove_install_backups(&created).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn backup_write_failure_preserves_replacements_and_reports_cleanup_errors() {
+        use super::*;
+        use std::io::Write;
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        for replacement in ["file", "link", "mode", "bytes"] {
+            let temp = tempfile::tempdir().unwrap();
+            let a = temp.path().join("earlier");
+            let b = temp.path().join("failing");
+            let sentinel = temp.path().join("sentinel");
+            std::fs::write(&sentinel, b"original user bytes\n").unwrap();
+            let pending = vec![
+                (a.clone(), b"earlier original\n".to_vec()),
+                (b.clone(), b"original user bytes\n".to_vec()),
+            ];
+            let mut owned = Vec::new();
+            let error =
+                create_install_backups_with_write(&pending, &mut owned, |path, file, contents| {
+                    if path == a {
+                        return file.write_all(contents);
+                    }
+                    file.write_all(&contents[..5])?;
+                    match replacement {
+                        "file" => {
+                            std::fs::remove_file(path)?;
+                            std::fs::write(path, b"original user bytes\n")?;
+                            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+                        }
+                        "link" => {
+                            std::fs::remove_file(path)?;
+                            symlink(&sentinel, path)?;
+                        }
+                        "mode" => file.set_permissions(std::fs::Permissions::from_mode(0o640))?,
+                        "bytes" => std::fs::write(path, b"owner changed")?,
+                        _ => unreachable!(),
+                    }
+                    Err(std::io::Error::from_raw_os_error(5))
+                })
+                .unwrap_err();
+            let error = format!("{error:#}");
+            assert!(
+                error.contains("Input/output error")
+                    && error.contains("backup cleanup incomplete")
+                    && error.contains(b.to_str().unwrap()),
+                "{replacement}: {error}"
+            );
+            assert!(
+                a.is_file(),
+                "completed earlier original must survive creator error"
+            );
+            let cleanup = finalize_install_backups(&owned, true).unwrap_err();
+            assert!(format!("{cleanup:#}").contains(b.to_str().unwrap()));
+            assert!(!a.exists());
+            assert!(std::fs::symlink_metadata(&b).is_ok());
+            assert_eq!(std::fs::read(&sentinel).unwrap(), b"original user bytes\n");
+            match replacement {
+                "file" => assert_eq!(std::fs::read(&b).unwrap(), b"original user bytes\n"),
+                "link" => assert_eq!(std::fs::read_link(&b).unwrap(), sentinel),
+                "mode" => assert_eq!(
+                    std::fs::metadata(&b).unwrap().permissions().mode() & 0o777,
+                    0o640
+                ),
+                "bytes" => assert_eq!(std::fs::read(&b).unwrap(), b"owner changed"),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_stale_prune_failure_positions_and_persistence_restore_exact_nodes() {
+        use super::*;
+        use sha2::Digest;
+        use std::os::unix::fs::PermissionsExt;
+        for fail_at in [1, 2, 3, 4] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("root");
+            let cfg = root.join(".config/agent-home");
+            std::fs::create_dir_all(&cfg).unwrap();
+            let mut manifest = ah_core::Manifest::default();
+            let mut before = Vec::new();
+            for name in ["a-file", "b-link", "c-link"] {
+                let target = root.join(name);
+                let (kind, source, hash) = if name == "a-file" {
+                    std::fs::write(&target, b"generated original\n").unwrap();
+                    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640))
+                        .unwrap();
+                    (
+                        "generated-file",
+                        None,
+                        Some(hex::encode(sha2::Sha256::digest(b"generated original\n"))),
+                    )
+                } else {
+                    std::os::unix::fs::symlink(temp.path(), &target).unwrap();
+                    ("symlink", Some(temp.path().display().to_string()), None)
+                };
+                before.push((target.clone(), recovery::Node::read(&target).unwrap()));
+                manifest.entries.insert(
+                    target.display().to_string(),
+                    ah_core::ManifestEntry {
+                        kind: kind.into(),
+                        target: target.display().to_string(),
+                        source,
+                        backup: None,
+                        original_sha256: None,
+                        installed_sha256: hash,
+                    },
+                );
+            }
+            let mp = cfg.join("manifest.json");
+            manifest.save_atomic(&mp).unwrap();
+            let original_manifest = recovery::Node::read(&mp).unwrap();
+            let plan = ah_core::Planner::new().finish(false);
+            let error = prune_stale_impl(&cfg, &plan, &root, false, None, |i, _| {
+                if i == fail_at {
+                    anyhow::bail!("injected ordinary prune failure at {i}");
+                }
+                if fail_at == 4 && i == 3 {
+                    std::fs::create_dir(mp.with_extension("json.tmp"))?;
+                }
+                Ok(())
+            })
+            .unwrap_err();
+            let error = format!("{error:#}");
+            if fail_at <= 3 {
+                assert!(error.contains("injected ordinary prune failure"), "{error}");
+            } else {
+                assert!(error.contains("creating manifest temp file"), "{error}");
+            }
+            for (path, node) in &before {
+                assert!(
+                    node.matches(path).unwrap(),
+                    "{fail_at}: {} not restored",
+                    path.display()
+                );
+            }
+            assert!(original_manifest.matches(&mp).unwrap());
+            if fail_at == 4 {
+                assert!(mp.with_extension("json.tmp").is_dir());
+                std::fs::remove_dir(mp.with_extension("json.tmp")).unwrap();
+            }
+            prune_stale_impl(&cfg, &plan, &root, false, None, |_, _| Ok(())).unwrap();
+            assert!(ah_core::Manifest::load(&mp).unwrap().entries.is_empty());
+            for (path, _) in &before {
+                assert!(matches!(
+                    recovery::Node::read(path).unwrap(),
+                    recovery::Node::Absent
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_stale_prune_preserves_replacements_before_removal_and_rollback() {
+        use super::*;
+        for boundary in ["before-remove", "before-rollback"] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("root");
+            let cfg = root.join(".config/agent-home");
+            std::fs::create_dir_all(&cfg).unwrap();
+            let a = root.join("a");
+            let b = root.join("b");
+            let mut manifest = ah_core::Manifest::default();
+            for target in [&a, &b] {
+                std::os::unix::fs::symlink(temp.path(), target).unwrap();
+                manifest.entries.insert(
+                    target.display().to_string(),
+                    ah_core::ManifestEntry {
+                        kind: "symlink".into(),
+                        target: target.display().to_string(),
+                        source: Some(temp.path().display().to_string()),
+                        backup: None,
+                        original_sha256: None,
+                        installed_sha256: None,
+                    },
+                );
+            }
+            let mp = cfg.join("manifest.json");
+            manifest.save_atomic(&mp).unwrap();
+            let old = std::fs::read(&mp).unwrap();
+            let error = prune_stale_impl(
+                &cfg,
+                &ah_core::Planner::new().finish(false),
+                &root,
+                false,
+                None,
+                |i, target| {
+                    if boundary == "before-remove" && i == 1 {
+                        std::fs::remove_file(target)?;
+                        std::fs::write(target, b"owner replacement\n")?;
+                    } else if boundary == "before-rollback" && i == 2 {
+                        std::fs::write(&a, b"owner replacement\n")?;
+                        anyhow::bail!("later prune failure");
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+            let error = format!("{error:#}");
+            assert!(error.contains("preserving user changes"), "{error}");
+            if boundary == "before-rollback" {
+                assert!(error.contains("rollback incomplete"), "{error}");
+            }
+            assert_eq!(std::fs::read(&a).unwrap(), b"owner replacement\n");
+            assert_eq!(std::fs::read_link(&b).unwrap(), temp.path());
+            assert_eq!(std::fs::read(&mp).unwrap(), old);
+        }
+    }
+
+    #[test]
+    fn install_late_seal_failure_restores_stale_nodes_local_presence_and_manifest() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        for present in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let home = temp.path().join("home");
+            let shared =
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/shared-home");
+            let options = || InstallOptions {
+                home_repo: Some(shared.clone()),
+                root: Some(home.clone()),
+                profile: Some(ProfileArg::Core),
+                dry_run: false,
+                repos_dir: Some(temp.path().join("new-repos")),
+                vault: None,
+            };
+            install(options()).unwrap();
+            let cfg = home.join(".config/agent-home");
+            let local = cfg.join("config.toml");
+            if present {
+                std::fs::write(&local, b"schema = 1\nprofile = \"core\"\n# owner config\n")
+                    .unwrap();
+                std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o640)).unwrap();
+            } else {
+                std::fs::remove_file(&local).unwrap();
+            }
+            let before_local = recovery::Node::read(&local).unwrap();
+            let mp = cfg.join("manifest.json");
+            let mut manifest = ah_core::Manifest::load(&mp).unwrap();
+            // Derive a valid stale link entry from the real installed manifest.
+            let mut stale_entry = manifest
+                .entries
+                .values()
+                .find(|e| e.kind == "symlink")
+                .unwrap()
+                .clone();
+            let stale = home.join("old-skill");
+            std::os::unix::fs::symlink(stale_entry.source.as_ref().unwrap(), &stale).unwrap();
+            stale_entry.target = stale.display().to_string();
+            manifest
+                .entries
+                .insert(stale.display().to_string(), stale_entry);
+            manifest.save_atomic(&mp).unwrap();
+            let before_manifest = recovery::Node::read(&mp).unwrap();
+            let before_stale = recovery::Node::read(&stale).unwrap();
+            let jp = temp.path().join("transaction.json");
+            let error = install_impl(options(), Some(&jp), || {
+                assert!(matches!(
+                    recovery::Node::read(&stale)?,
+                    recovery::Node::Absent
+                ));
+                anyhow::bail!("late seal failure after stale prune and manifest persist");
+            })
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("late seal failure"));
+            assert!(
+                before_local.matches(&local).unwrap(),
+                "local present={present}"
+            );
+            assert!(before_manifest.matches(&mp).unwrap());
+            assert!(before_stale.matches(&stale).unwrap());
+            recovery::Journal::rollback_file(&jp).unwrap();
+            install(options()).unwrap();
+            assert!(matches!(
+                recovery::Node::read(&stale).unwrap(),
+                recovery::Node::Absent
+            ));
+            assert!(!ah_core::Manifest::load(&mp)
+                .unwrap()
+                .entries
+                .contains_key(stale.to_str().unwrap()));
+        }
     }
 
     #[test]

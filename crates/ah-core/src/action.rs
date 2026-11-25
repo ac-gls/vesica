@@ -234,6 +234,191 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
+    thread_local! {
+        pub(super) static POSTIMAGE_READ_FAILURE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executor_postimage_read_error_restores_mutation_before_commit() {
+        use std::os::unix::fs::PermissionsExt;
+        for present in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("settings");
+            let original = b"# owner original shell config\n";
+            if present {
+                std::fs::write(&target, original).unwrap();
+                std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+            }
+            let plan = Plan {
+                actions: vec![Action::UpsertBlock {
+                    path: target.display().to_string(),
+                    style: "hash".into(),
+                    name: "test".into(),
+                    body: "managed".into(),
+                }],
+                dry_run: false,
+            };
+            let mut committed = false;
+            POSTIMAGE_READ_FAILURE.with(|f| f.set(true));
+            let result = Executor.execute_with_commit(&plan, |_| {
+                committed = true;
+                anyhow::bail!("later commit failure")
+            });
+            POSTIMAGE_READ_FAILURE.with(|f| f.set(false));
+            let error = result.unwrap_err();
+            assert!(
+                format!("{error:#}").contains("Input/output error"),
+                "postimage read error was swallowed: {error:#}"
+            );
+            assert!(!committed, "verification error must prevent commit");
+            if present {
+                assert_eq!(std::fs::read(&target).unwrap(), original);
+                assert_eq!(
+                    std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+                    0o640
+                );
+            } else {
+                assert!(!target.exists());
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executor_postimage_error_action_matrix_restores_known_owned_nodes() {
+        use std::os::unix::fs::PermissionsExt;
+        for kind in ["block", "json", "toml", "generated", "symlink", "directory"] {
+            for present in [false, true] {
+                if present && matches!(kind, "generated" | "symlink" | "directory") {
+                    continue;
+                }
+                let dir = tempfile::tempdir().unwrap();
+                let p = dir.path().join("target");
+                let original = match kind {
+                    "json" => "{\"user\":true}\n",
+                    "toml" => "user = true\n",
+                    _ => "# owner original\n",
+                };
+                if present {
+                    std::fs::write(&p, original).unwrap();
+                    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+                }
+                let path = p.display().to_string();
+                let action = match kind {
+                    "block" => Action::UpsertBlock {
+                        path,
+                        style: "hash".into(),
+                        name: "test".into(),
+                        body: "managed".into(),
+                    },
+                    "json" => Action::MergeJsonc {
+                        path,
+                        patch: serde_json::json!({"managed":true}),
+                    },
+                    "toml" => Action::MergeToml {
+                        path,
+                        patch: serde_json::json!({"managed":true}),
+                    },
+                    "generated" => Action::WriteFile {
+                        path,
+                        content: "new managed file".into(),
+                    },
+                    "symlink" => Action::Symlink {
+                        source: dir.path().join("referent").display().to_string(),
+                        destination: path,
+                    },
+                    "directory" => Action::CreateDir { path },
+                    _ => unreachable!(),
+                };
+                POSTIMAGE_READ_FAILURE.with(|f| f.set(true));
+                let mut commit = false;
+                let mut finalizations = 0;
+                let error = Executor
+                    .execute_with_commit_and_rollback(
+                        &Plan {
+                            actions: vec![action],
+                            dry_run: false,
+                        },
+                        |_| {
+                            commit = true;
+                            Ok(())
+                        },
+                        |restored| {
+                            finalizations += 1;
+                            assert!(restored);
+                            if present {
+                                assert_eq!(std::fs::read(&p).unwrap(), original.as_bytes());
+                            } else {
+                                assert!(std::fs::symlink_metadata(&p).is_err());
+                            }
+                            Ok(())
+                        },
+                    )
+                    .unwrap_err();
+                POSTIMAGE_READ_FAILURE.with(|f| f.set(false));
+                assert!(!commit && finalizations == 1);
+                assert!(format!("{error:#}").contains("Input/output error"));
+                if present {
+                    assert_eq!(
+                        std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+                        0o640
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executor_finalizer_observes_restoration_and_preserves_primary_cleanup_errors() {
+        for conflict in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let p = dir.path().join("target");
+            std::fs::write(&p, "# original\n").unwrap();
+            let mut finalizations = 0;
+            let error = Executor
+                .execute_with_commit_and_rollback(
+                    &Plan {
+                        actions: vec![Action::UpsertBlock {
+                            path: p.display().to_string(),
+                            style: "hash".into(),
+                            name: "test".into(),
+                            body: "managed".into(),
+                        }],
+                        dry_run: false,
+                    },
+                    |_| {
+                        if conflict {
+                            std::fs::write(&p, "owner edit")?;
+                        }
+                        anyhow::bail!("primary persistence failure")
+                    },
+                    |restored| {
+                        finalizations += 1;
+                        assert_eq!(restored, !conflict);
+                        assert_eq!(
+                            std::fs::read(&p).unwrap(),
+                            if conflict {
+                                b"owner edit".as_slice()
+                            } else {
+                                b"# original\n".as_slice()
+                            }
+                        );
+                        anyhow::bail!("finalization failure")
+                    },
+                )
+                .unwrap_err();
+            let text = format!("{error:#}");
+            assert_eq!(finalizations, 1);
+            assert!(
+                text.contains("primary persistence failure")
+                    && text.contains("finalization failure")
+            );
+            assert_eq!(text.contains("rollback also failed"), conflict);
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn executor_restore_uses_original_permissions_not_applied_mode() {
@@ -1222,6 +1407,112 @@ mod tests {
     }
 
     #[test]
+    fn new_generated_staging_returns_write_error_without_partial_publication() {
+        use std::io::Write;
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("generated.md");
+        let error = stage_new_generated_file(&target, b"complete content", |file| {
+            file.write_all(b"complete")?;
+            anyhow::bail!("injected short write error");
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("injected short write error"));
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+        assert_eq!(
+            write_new_or_equal(&target, b"complete content").unwrap(),
+            ActionOutcome::Created
+        );
+        assert_eq!(
+            write_new_or_equal(&target, b"complete content").unwrap(),
+            ActionOutcome::AlreadyCorrect
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"complete content");
+    }
+
+    #[test]
+    fn new_generated_staging_preserves_destination_and_temp_replacements() {
+        use std::io::Write;
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        for replacement in [
+            "destination-file",
+            "destination-link",
+            "temporary-link",
+            "temporary-mode",
+            "temporary-bytes",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let target = temp.path().join("generated.md");
+            let sentinel = temp.path().join("sentinel");
+            std::fs::write(&sentinel, b"complete content").unwrap();
+            let mut changed_temp = None;
+            let result = stage_new_generated_file(&target, b"complete content", |file| {
+                file.write_all(b"complete content")?;
+                let staging = std::fs::read_dir(temp.path())?
+                    .map(|e| e.unwrap().path())
+                    .find(|p| {
+                        p.file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .starts_with(".generated.md.")
+                    })
+                    .unwrap();
+                match replacement {
+                    "destination-file" => std::fs::write(&target, b"owner destination")?,
+                    "destination-link" => symlink(&sentinel, &target)?,
+                    "temporary-link" => {
+                        std::fs::remove_file(&staging)?;
+                        symlink(&sentinel, &staging)?;
+                    }
+                    "temporary-mode" => {
+                        file.set_permissions(std::fs::Permissions::from_mode(0o640))?
+                    }
+                    "temporary-bytes" => std::fs::write(&staging, b"owner changed staging")?,
+                    _ => unreachable!(),
+                }
+                changed_temp = Some(staging);
+                if replacement.starts_with("temporary-") {
+                    anyhow::bail!("injected prepare failure");
+                }
+                Ok(())
+            });
+            assert_eq!(std::fs::read(&sentinel).unwrap(), b"complete content");
+            if replacement.starts_with("destination-") {
+                assert_eq!(result.unwrap(), ActionOutcome::Collision);
+                assert!(!changed_temp.unwrap().exists());
+                if replacement == "destination-file" {
+                    assert_eq!(std::fs::read(&target).unwrap(), b"owner destination");
+                } else {
+                    assert_eq!(std::fs::read_link(&target).unwrap(), sentinel);
+                }
+            } else {
+                let error = format!("{:#}", result.unwrap_err());
+                assert!(
+                    error.contains("injected prepare failure")
+                        && error.contains("staging cleanup failed"),
+                    "{replacement}: {error}"
+                );
+                let staging = changed_temp.unwrap();
+                assert!(
+                    std::fs::symlink_metadata(&staging).is_ok(),
+                    "{replacement}: replacement deleted"
+                );
+                assert!(!target.exists());
+                match replacement {
+                    "temporary-link" => assert_eq!(std::fs::read_link(staging).unwrap(), sentinel),
+                    "temporary-mode" => assert_eq!(
+                        std::fs::metadata(staging).unwrap().permissions().mode() & 0o777,
+                        0o640
+                    ),
+                    "temporary-bytes" => {
+                        assert_eq!(std::fs::read(staging).unwrap(), b"owner changed staging")
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+
+    #[test]
     fn rejects_removal_until_manifest_checked_uninstall_is_implemented() {
         let plan = Plan {
             actions: vec![Action::RemovePath {
@@ -1260,6 +1551,10 @@ impl Snapshot {
 }
 
 fn snapshot_after_apply(action: &Action) -> anyhow::Result<Option<Snapshot>> {
+    #[cfg(test)]
+    if tests::POSTIMAGE_READ_FAILURE.with(|f| f.replace(false)) {
+        return Err(std::io::Error::from_raw_os_error(5).into());
+    }
     match action {
         Action::UpsertBlock { path, .. }
         | Action::MergeJsonc { path, .. }
@@ -1300,6 +1595,42 @@ impl Executor {
     where
         F: FnOnce(&[ActionOutcome]) -> anyhow::Result<()>,
     {
+        self.execute_with_commit_and_rollback(plan, commit, |_| Ok(()))
+    }
+
+    /// Finalize external recovery artifacts only after action rollback completes.
+    /// `restored` is false whenever guarded action undo reports a conflict/error.
+    pub fn execute_with_commit_and_rollback<F, G>(
+        &self,
+        plan: &Plan,
+        commit: F,
+        finalize: G,
+    ) -> anyhow::Result<Vec<ActionOutcome>>
+    where
+        F: FnOnce(&[ActionOutcome]) -> anyhow::Result<()>,
+        G: FnOnce(bool) -> anyhow::Result<()>,
+    {
+        let mut restored = true;
+        let result = self.execute_with_commit_report(plan, commit, &mut restored);
+        let cleanup = finalize(restored);
+        match (result, cleanup) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(cleanup)) => {
+                anyhow::bail!("{error:#}; recovery finalization also failed: {cleanup:#}")
+            }
+        }
+    }
+
+    fn execute_with_commit_report<F>(
+        &self,
+        plan: &Plan,
+        commit: F,
+        restored: &mut bool,
+    ) -> anyhow::Result<Vec<ActionOutcome>>
+    where
+        F: FnOnce(&[ActionOutcome]) -> anyhow::Result<()>,
+    {
         let mut applied = Vec::new();
         for action in &plan.actions {
             let before = if plan.dry_run {
@@ -1309,6 +1640,7 @@ impl Executor {
                     Ok(before) => before,
                     Err(error) => {
                         let rollback_errors = self.rollback(&applied);
+                        *restored &= rollback_errors.is_empty();
                         if !rollback_errors.is_empty() {
                             anyhow::bail!(
                                 "failed to snapshot action: {error:#}; rollback also failed: {}",
@@ -1319,21 +1651,41 @@ impl Executor {
                     }
                 }
             };
-            match self.execute_one(action, plan.dry_run) {
+            let mut owned_after = None;
+            match self.execute_one_owned(action, plan.dry_run, &mut owned_after) {
                 Ok(outcome) => {
-                    let applied_bytes = if !plan.dry_run
-                        && matches!(outcome, ActionOutcome::Created | ActionOutcome::Updated)
-                    {
-                        snapshot_after_apply(action).ok().flatten()
-                    } else {
-                        None
-                    };
+                    let mutated = !plan.dry_run
+                        && matches!(outcome, ActionOutcome::Created | ActionOutcome::Updated);
+                    // Ownership is recorded from the successful writer, before a
+                    // fallible post-mutation read can prevent rollback.
                     applied.push(AppliedAction {
                         action: action.clone(),
                         outcome,
                         before,
-                        after: applied_bytes,
+                        after: owned_after,
                     });
+                    if mutated {
+                        let verification = snapshot_after_apply(action).and_then(|actual| {
+                            let expected = applied.last().and_then(|a| a.after.as_ref());
+                            if actual.as_ref().map(|a| (&a.bytes, &a.permissions))
+                                != expected.map(|a| (&a.bytes, &a.permissions))
+                            {
+                                anyhow::bail!(
+                                    "action postimage changed after mutation: {}",
+                                    action.key()
+                                );
+                            }
+                            Ok(())
+                        });
+                        if let Err(error) = verification {
+                            let rollback_errors = self.rollback(&applied);
+                            *restored &= rollback_errors.is_empty();
+                            if !rollback_errors.is_empty() {
+                                anyhow::bail!("post-mutation verification failed: {error:#}; rollback also failed: {}", rollback_errors.join("; "));
+                            }
+                            return Err(error);
+                        }
+                    }
                     #[cfg(test)]
                     if !plan.dry_run {
                         match tests::AFTER_ACTION_HOOK.with(|hook| hook.replace(0)) {
@@ -1358,8 +1710,24 @@ impl Executor {
                     }
                 }
                 Err(error) => {
+                    // A writer may fail during cleanup after publication. Keep
+                    // its known postimage if the publication could not be undone.
+                    if owned_after.is_some() {
+                        let outcome = if before.is_some() {
+                            ActionOutcome::Updated
+                        } else {
+                            ActionOutcome::Created
+                        };
+                        applied.push(AppliedAction {
+                            action: action.clone(),
+                            outcome,
+                            before,
+                            after: owned_after,
+                        });
+                    }
                     if !plan.dry_run {
                         let rollback_errors = self.rollback(&applied);
+                        *restored &= rollback_errors.is_empty();
                         if !rollback_errors.is_empty() {
                             anyhow::bail!(
                                 "action failed: {error:#}; rollback also failed: {}",
@@ -1378,6 +1746,7 @@ impl Executor {
         if let Err(error) = commit(&outcomes) {
             if !plan.dry_run {
                 let rollback_errors = self.rollback(&applied);
+                *restored &= rollback_errors.is_empty();
                 if !rollback_errors.is_empty() {
                     anyhow::bail!(
                         "commit failed: {error:#}; rollback also failed: {}",
@@ -1545,7 +1914,17 @@ impl Executor {
         Ok(())
     }
 
+    #[cfg(test)]
     fn execute_one(&self, action: &Action, dry_run: bool) -> anyhow::Result<ActionOutcome> {
+        self.execute_one_owned(action, dry_run, &mut None)
+    }
+
+    fn execute_one_owned(
+        &self,
+        action: &Action,
+        dry_run: bool,
+        after: &mut Option<Snapshot>,
+    ) -> anyhow::Result<ActionOutcome> {
         if dry_run {
             return Ok(ActionOutcome::DryRun);
         }
@@ -1562,18 +1941,26 @@ impl Executor {
                 Ok(ActionOutcome::Created)
             }
             Action::WriteFile { path, content } => {
-                write_new_or_equal(std::path::Path::new(path), content.as_bytes())
+                write_new_or_equal_owned(std::path::Path::new(path), content.as_bytes(), after)
             }
             Action::Symlink {
                 source,
                 destination,
             } => {
+                let desired = if std::path::Path::new(source).is_absolute() {
+                    std::path::PathBuf::from(source)
+                } else {
+                    std::env::current_dir()?.join(source)
+                };
                 let outcome = ah_config::symlink::link_entry(
                     std::path::Path::new(source),
                     std::path::Path::new(destination),
                 )?;
                 Ok(match outcome {
-                    ah_config::symlink::LinkOutcome::Created => ActionOutcome::Created,
+                    ah_config::symlink::LinkOutcome::Created => {
+                        *after = Some(Snapshot::symlink(&desired));
+                        ActionOutcome::Created
+                    }
                     ah_config::symlink::LinkOutcome::AlreadyCorrect => {
                         ActionOutcome::AlreadyCorrect
                     }
@@ -1598,7 +1985,7 @@ impl Executor {
                     _ => anyhow::bail!("unsupported managed-block comment style: {style}"),
                 };
                 let updated = ah_config::block::upsert(&original, style, name, body);
-                write_merge_outcome(path, &original, &updated)
+                write_merge_outcome(path, &original, &updated, after)
             }
             Action::MergeJsonc { path, patch } => {
                 let path = std::path::Path::new(path);
@@ -1608,7 +1995,7 @@ impl Executor {
                     Err(error) => return Err(error.into()),
                 };
                 let updated = ah_config::jsonc::merge_jsonc(&original, patch)?;
-                write_merge_outcome(path, &original, &updated)
+                write_merge_outcome(path, &original, &updated, after)
             }
             Action::MergeToml { path, patch } => {
                 let path = std::path::Path::new(path);
@@ -1618,7 +2005,7 @@ impl Executor {
                     Err(error) => return Err(error.into()),
                 };
                 let updated = ah_config::toml_edit::merge_toml(&original, patch)?;
-                write_merge_outcome(path, &original, &updated)
+                write_merge_outcome(path, &original, &updated, after)
             }
             Action::RemovePath { .. } => anyhow::bail!(
                 "RemovePath is disabled until manifest-verified uninstall is implemented"
@@ -1631,6 +2018,7 @@ fn write_merge_outcome(
     path: &std::path::Path,
     original: &str,
     updated: &str,
+    after: &mut Option<Snapshot>,
 ) -> anyhow::Result<ActionOutcome> {
     if updated == original {
         return Ok(ActionOutcome::AlreadyCorrect);
@@ -1640,7 +2028,7 @@ fn write_merge_outcome(
     } else {
         ActionOutcome::Created
     };
-    write_replacement(path, updated.as_bytes())?;
+    write_replacement_owned(path, updated.as_bytes(), None, after)?;
     Ok(outcome)
 }
 
@@ -1665,39 +2053,177 @@ fn snapshot_for_rollback(action: &Action) -> anyhow::Result<Option<Snapshot>> {
     }
 }
 
+#[cfg(test)]
 fn write_new_or_equal(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<ActionOutcome> {
-    if path.exists() {
-        return Ok(if std::fs::read(path)? == bytes {
+    write_new_or_equal_owned(path, bytes, &mut None)
+}
+
+fn write_new_or_equal_owned(
+    path: &std::path::Path,
+    bytes: &[u8],
+    after: &mut Option<Snapshot>,
+) -> anyhow::Result<ActionOutcome> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => return existing_generated_outcome(path, bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    stage_new_generated_file_owned(path, bytes, after, |file| {
+        use std::io::Write;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(())
+    })
+}
+
+fn existing_generated_outcome(
+    path: &std::path::Path,
+    bytes: &[u8],
+) -> anyhow::Result<ActionOutcome> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    Ok(
+        if metadata.is_file() && !metadata.file_type().is_symlink() && std::fs::read(path)? == bytes
+        {
             ActionOutcome::AlreadyCorrect
         } else {
             ActionOutcome::Collision
-        });
-    }
+        },
+    )
+}
+
+/// Publish only complete content, with no-clobber hard-link creation on the same filesystem.
+/// The open staging handle supplies cleanup identity even after a partial write error.
+#[cfg(test)]
+fn stage_new_generated_file<F>(
+    path: &std::path::Path,
+    bytes: &[u8],
+    prepare: F,
+) -> anyhow::Result<ActionOutcome>
+where
+    F: FnOnce(&mut std::fs::File) -> anyhow::Result<()>,
+{
+    stage_new_generated_file_owned(path, bytes, &mut None, prepare)
+}
+
+fn stage_new_generated_file_owned<F>(
+    path: &std::path::Path,
+    bytes: &[u8],
+    after: &mut Option<Snapshot>,
+    prepare: F,
+) -> anyhow::Result<ActionOutcome>
+where
+    F: FnOnce(&mut std::fs::File) -> anyhow::Result<()>,
+{
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_NEW_TEMP: AtomicU64 = AtomicU64::new(0);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    match options.open(path) {
-        Ok(mut file) => {
-            use std::io::Write;
-            file.write_all(bytes)?;
-            Ok(ActionOutcome::Created)
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let (temporary, mut file) = loop {
+        let id = NEXT_NEW_TEMP.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(
+            ".{name}.agent-home-new-{}-{id}.tmp",
+            std::process::id()
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            Ok(if std::fs::read(path)? == bytes {
-                ActionOutcome::AlreadyCorrect
+        match options.open(&candidate) {
+            Ok(file) => break (candidate, file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let identity = file.metadata().map_err(|error| {
+        anyhow::anyhow!(
+            "cannot capture staging ownership; retained {} for inspection: {error}",
+            temporary.display()
+        )
+    })?;
+    let result = prepare(&mut file).and_then(|()| {
+        // Refuse staging replacement or mode edits; do not publish someone else's node.
+        verify_created_file(&temporary, &identity, bytes, true)?;
+        std::fs::hard_link(&temporary, path)?;
+        *after = Some(Snapshot {
+            bytes: bytes.to_vec(),
+            permissions: Some(identity.permissions()),
+        });
+        Ok(ActionOutcome::Created)
+    });
+    let cleanup = remove_created_file(&temporary, &identity, bytes);
+    match (result, cleanup) {
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Ok(_), Err(cleanup)) => {
+            let undo = remove_created_file(path, &identity, bytes);
+            if undo.is_ok() {
+                *after = None;
+            }
+            anyhow::bail!("generated-file staging cleanup failed: {cleanup:#}; publication rollback: {undo:?}");
+        }
+        (Err(error), Ok(())) => {
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::AlreadyExists)
+            {
+                existing_generated_outcome(path, bytes)
             } else {
-                ActionOutcome::Collision
-            })
+                Err(error)
+            }
         }
-        Err(error) => Err(error.into()),
+        (Err(error), Err(cleanup)) => anyhow::bail!(
+            "generated-file preparation failed: {error:#}; staging cleanup failed: {cleanup:#}"
+        ),
     }
+}
+
+fn verify_created_file(
+    path: &std::path::Path,
+    identity: &std::fs::Metadata,
+    bytes: &[u8],
+    require_complete: bool,
+) -> anyhow::Result<()> {
+    let current = std::fs::symlink_metadata(path)?;
+    #[cfg(unix)]
+    let same_node = {
+        use std::os::unix::fs::MetadataExt;
+        current.dev() == identity.dev() && current.ino() == identity.ino()
+    };
+    #[cfg(not(unix))]
+    let same_node = false; // No file-ID primitive here: refuse destructive cleanup.
+    if !current.is_file()
+        || current.file_type().is_symlink()
+        || !same_node
+        || current.permissions() != identity.permissions()
+    {
+        anyhow::bail!(
+            "created file changed; preserving replacement: {}",
+            path.display()
+        );
+    }
+    let current_bytes = std::fs::read(path)?;
+    if (require_complete && current_bytes != bytes) || !bytes.starts_with(&current_bytes) {
+        anyhow::bail!(
+            "created file bytes changed; preserving replacement: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn remove_created_file(
+    path: &std::path::Path,
+    identity: &std::fs::Metadata,
+    bytes: &[u8],
+) -> anyhow::Result<()> {
+    verify_created_file(path, identity, bytes, false)?;
+    std::fs::remove_file(path)?;
+    Ok(())
 }
 
 pub fn atomic_replace_file(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
@@ -1712,6 +2238,15 @@ fn write_replacement_with_permissions(
     path: &std::path::Path,
     bytes: &[u8],
     restore_permissions: Option<&std::fs::Permissions>,
+) -> anyhow::Result<ActionOutcome> {
+    write_replacement_owned(path, bytes, restore_permissions, &mut None)
+}
+
+fn write_replacement_owned(
+    path: &std::path::Path,
+    bytes: &[u8],
+    restore_permissions: Option<&std::fs::Permissions>,
+    after: &mut Option<Snapshot>,
 ) -> anyhow::Result<ActionOutcome> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1771,17 +2306,27 @@ fn write_replacement_with_permissions(
         }
         Ok(())
     })();
+    let prepared = result.and_then(|()| {
+        let permissions = file.metadata()?.permissions();
+        Ok(Snapshot {
+            bytes: bytes.to_vec(),
+            permissions: Some(permissions),
+        })
+    });
     drop(file);
-    if let Err(error) = result {
-        return match std::fs::remove_file(&temporary) {
-            Ok(()) => Err(error),
-            Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => Err(error),
-            Err(cleanup) => anyhow::bail!(
-                "replacement failed: {error:#}; temporary cleanup failed for {}: {cleanup}",
-                temporary.display()
-            ),
-        };
-    }
+    let prepared = match prepared {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return match std::fs::remove_file(&temporary) {
+                Ok(()) => Err(error),
+                Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => Err(error),
+                Err(cleanup) => anyhow::bail!(
+                    "replacement failed: {error:#}; temporary cleanup failed for {}: {cleanup}",
+                    temporary.display()
+                ),
+            };
+        }
+    };
     #[cfg(not(test))]
     let rename_result = std::fs::rename(&temporary, path);
     #[cfg(test)]
@@ -1797,5 +2342,6 @@ fn write_replacement_with_permissions(
             ),
         };
     }
+    *after = Some(prepared);
     Ok(ActionOutcome::Updated)
 }
