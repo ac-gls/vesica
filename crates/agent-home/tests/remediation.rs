@@ -878,3 +878,207 @@ fn all_cli_git_subprocess_construction_uses_the_sanitized_wrapper() {
         );
     }
 }
+
+#[test]
+fn legacy_relative_manifest_fields_refuse_with_owner_recovery_guidance_without_mutation() {
+    for field in ["shared_home", "vault", "target", "backup", "source"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("home");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(".bashrc"), "synthetic original\n").unwrap();
+        install(&root);
+        let manifest_path = root.join(".config/agent-home/manifest.json");
+        let mut old = manifest(&root);
+        if matches!(field, "shared_home" | "vault") {
+            old[field] = serde_json::json!("legacy-relative");
+        } else {
+            let entry = old["entries"]
+                .as_object_mut()
+                .unwrap()
+                .values_mut()
+                .find(|entry| entry["backup"].is_string())
+                .unwrap();
+            entry[field] = serde_json::json!("legacy-relative");
+        }
+        std::fs::write(&manifest_path, serde_json::to_vec_pretty(&old).unwrap()).unwrap();
+        std::fs::write(
+            tmp.path().join("outside-sentinel"),
+            b"unmanaged outside bytes\n",
+        )
+        .unwrap();
+        let other_cwd = tmp.path().join("other-cwd");
+        std::fs::create_dir(&other_cwd).unwrap();
+        let before = tree_snapshot(tmp.path());
+        for (operation, dry) in [
+            ("uninstall", false),
+            ("uninstall", true),
+            ("install", false),
+            ("install", true),
+        ] {
+            let mut cmd = Command::cargo_bin("vesica").unwrap();
+            cmd.current_dir(&other_cwd)
+                .args([operation, "--root"])
+                .arg(&root);
+            if operation == "install" {
+                cmd.arg("--home-repo").arg(fixture());
+            }
+            if dry {
+                cmd.arg("--dry-run");
+            }
+            let out = cmd.output().unwrap();
+            assert!(
+                !out.status.success(),
+                "{operation} accepted relative {field}"
+            );
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(stderr.contains("not absolute"), "{field}: {stderr}");
+            assert!(
+                stderr.contains("do not rebase using the current directory"),
+                "missing recovery guidance for {field}: {stderr}"
+            );
+            assert!(
+                stderr.contains("docs/TROUBLESHOOTING.md"),
+                "{field}: {stderr}"
+            );
+            assert_eq!(
+                tree_snapshot(tmp.path()),
+                before,
+                "{operation}/{dry}/{field} changed state"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn new_private_configuration_defaults_remain_0600_across_supported_umasks() {
+    use std::os::unix::fs::PermissionsExt;
+    for umask in ["000", "022", "077"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("home");
+        let out = std::process::Command::new("sh")
+            .args(["-c", "umask \"$1\"; shift; exec \"$@\"", "sh", umask])
+            .arg(assert_cmd::cargo::cargo_bin("vesica"))
+            .args(["install", "--home-repo"])
+            .arg(fixture())
+            .arg("--root")
+            .arg(&root)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        for relative in [
+            ".bashrc",
+            ".claude/CLAUDE.md",
+            ".codex/AGENTS.md",
+            ".config/opencode/opencode.json",
+            ".config/agent-home/config.env",
+            ".config/agent-home/config.toml",
+            ".config/agent-home/manifest.json",
+        ] {
+            let metadata = std::fs::symlink_metadata(root.join(relative)).unwrap();
+            assert!(metadata.is_file() && !metadata.file_type().is_symlink());
+            assert_eq!(
+                metadata.permissions().mode() & 0o777,
+                0o600,
+                "{relative}/{umask}"
+            );
+        }
+        uninstall(&root);
+    }
+}
+
+#[test]
+fn install_preview_does_not_certify_recorded_backup_integrity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("home");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join(".bashrc"), b"synthetic original\n").unwrap();
+    install(&root);
+    let installed = manifest(&root);
+    let key = root.join(".bashrc");
+    let backup = installed["entries"][key.to_str().unwrap()]["backup"]
+        .as_str()
+        .unwrap();
+    std::fs::write(backup, b"changed synthetic backup\n").unwrap();
+    let before = tree_snapshot(tmp.path());
+    for dry in [true, false] {
+        let mut cmd = Command::cargo_bin("vesica").unwrap();
+        cmd.args(["install", "--home-repo"])
+            .arg(fixture())
+            .arg("--root")
+            .arg(&root);
+        if dry {
+            cmd.arg("--dry-run");
+        }
+        let out = cmd.output().unwrap();
+        assert_eq!(
+            out.status.success(),
+            dry,
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if !dry {
+            assert!(String::from_utf8_lossy(&out.stderr).contains("recorded backup was modified"));
+        }
+        assert_eq!(
+            tree_snapshot(tmp.path()),
+            before,
+            "dry={dry} changed fixture"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn reinstall_rewrites_manifest_privately_but_preserves_managed_config_modes() {
+    use std::os::unix::fs::PermissionsExt;
+    for umask in ["000", "022", "077"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("home");
+        install(&root);
+        let files = [
+            ".bashrc",
+            ".config/agent-home/config.toml",
+            ".config/agent-home/manifest.json",
+        ];
+        for relative in files {
+            std::fs::set_permissions(root.join(relative), std::fs::Permissions::from_mode(0o640))
+                .unwrap();
+        }
+        let out = std::process::Command::new("sh")
+            .args(["-c", "umask \"$1\"; shift; exec \"$@\"", "sh", umask])
+            .arg(assert_cmd::cargo::cargo_bin("vesica"))
+            .args(["install", "--home-repo"])
+            .arg(fixture())
+            .arg("--root")
+            .arg(&root)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        for relative in files {
+            let expected = if relative.ends_with("manifest.json") {
+                0o600
+            } else {
+                0o640
+            };
+            assert_eq!(
+                std::fs::symlink_metadata(root.join(relative))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                expected,
+                "{relative}/{umask}"
+            );
+        }
+        uninstall(&root);
+    }
+}

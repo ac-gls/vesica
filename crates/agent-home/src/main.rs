@@ -570,6 +570,34 @@ fn validate_manifest_scope(
     machine_root: &Path,
     config_dir: &Path,
 ) -> Result<()> {
+    // A legacy relative path has no trustworthy base in the current invocation.
+    // Diagnose it without interpreting or rewriting it; all scope checks below remain required.
+    let require_absolute = |path: &str, field: &str| -> Result<()> {
+        if !Path::new(path).is_absolute() {
+            anyhow::bail!(
+                "manifest {field} path is not absolute: {path}; preserve the manifest and backups; \
+                 do not rebase using the current directory; establish the original install base \
+                 with the machine owner before repair; see docs/TROUBLESHOOTING.md \
+                 (Legacy relative manifests)"
+            );
+        }
+        Ok(())
+    };
+    if !manifest.shared_home.is_empty() {
+        require_absolute(&manifest.shared_home, "shared_home")?;
+    }
+    if let Some(vault) = manifest.vault.as_deref() {
+        require_absolute(vault, "vault")?;
+    }
+    for (key, entry) in &manifest.entries {
+        require_absolute(&entry.target, &format!("entry {key} target"))?;
+        if let Some(backup) = entry.backup.as_deref() {
+            require_absolute(backup, &format!("entry {key} backup"))?;
+        }
+        if let Some(source) = entry.source.as_deref() {
+            require_absolute(source, &format!("entry {key} source"))?;
+        }
+    }
     let machine_root = normalized_absolute(machine_root)?;
     let canonical_machine_root = canonical_path_with_missing(&machine_root)?;
     let config_dir = normalized_absolute(config_dir)?;
